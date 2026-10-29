@@ -1,0 +1,58 @@
+import random
+
+LINES = [
+    "Did you get a chance to look at the budget before the meeting?",
+    "I think we should push the launch back a week.",
+    "Honestly, the numbers look better than I expected.",
+    "Can you send me the slides when you get a minute?",
+    "We tried that last quarter and it didn't really work.",
+    "What time are we meeting tomorrow?",
+    "I'll pick up the kids after practice, don't worry about it.",
+    "The contractor said the kitchen will take another three weeks.",
+    "Do you want to grab lunch at that Thai place again?",
+    "My flight got delayed, so I'll be there around nine.",
+    "That's a fair point, but the customers keep asking for it.",
+    "Let's write it down so we don't forget.",
+    "I talked to Marcus and he's on board with the plan.",
+    "The dog has been weird all week, I might take him to the vet.",
+    "We need someone to own the onboarding flow.",
+    "Wait, did they actually approve the new hire?",
+    "I can take the first draft if you review it.",
+    "The traffic on the highway was a nightmare this morning.",
+    "Remind me to call the bank on Monday.",
+    "If we ship on Friday, nobody will be around to fix it.",
+    "That restaurant was way too loud last time.",
+    "I'm not sure the client will go for that price.",
+    "We should test it with real users before we decide.",
+    "Have you seen the new trailer? It looks pretty good.",
+    "The server went down twice last night.",
+    "Can we move this to Thursday instead?",
+    "I think the second option is cleaner, to be honest.",
+    "My sister is visiting next weekend, so I'm out.",
+    "Let me check my calendar and get back to you.",
+    "The report is mostly done, I just need the charts.",
+    "Nobody told me the deadline moved.",
+    "We could split the work between the two teams.",
+    "I'd rather not drive in this weather.",
+    "Did you remember to book the hotel?",
+    "The new design is growing on me.",
+    "Let's keep it simple for the first version.",
+    "I'm going to need more coffee for this.",
+    "He said he'd have the estimate by end of day.",
+    "We're almost out of milk, can you grab some?",
+    "That makes sense, let's go with that.",
+    "I wonder if the battery issue is the same bug.",
+    "Can you walk me through how you got that number?",
+    "The kids want pizza again, surprise surprise.",
+    "I'll set up a call with their engineering lead.",
+    "It's been a long week, I'm exhausted.",
+    "Let's revisit this after we hear from legal.",
+    "Do we know how many people signed up yesterday?",
+    "I left my charger in the car again.",
+]
+BACKCHANNELS = ["Yeah.", "Mm-hmm.", "Right.", "Okay.", "Totally.", "Sure.", "Oh, wow.", "Exactly."]
+
+
+def utterance(rng: random.Random) -> str:
+    n = rng.choice([1, 1, 2, 2, 3])
+    return " ".join(rng.sample(LINES, n))

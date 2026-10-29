@@ -1,0 +1,10 @@
+numpy>=2.0
+scipy>=1.13
+soundfile>=0.12
+onnxruntime>=1.18
+sherpa-onnx>=1.12,<2  # 2.x dropped the espeak frontend the simulator's TTS needs
+silero-vad>=5.1
+requests>=2.31
+# simulation and tests only
+pyroomacoustics>=0.7
+pytest>=8
