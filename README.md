@@ -47,18 +47,21 @@ been run against a live key yet.
 2 to 4 speakers including the wearer, and some include a stranger. Calendar
 hints are simulated as right 80% of the time.
 
-| Change | Words with the wrong speaker |
-| --- | --- |
-| Starting point (WeSpeaker voiceprints, default settings) | 62% |
-| TitaNet voiceprints (WeSpeaker collapses on distant voices: 28% vs 4% EER) | 34% |
-| Tuned threshold + gallery + s-norm | 29% |
-| + calendar hints | 23% |
-| + cohort from mixed rooms, threshold 2.5 | **22% busy room, 20% quiet room** |
-| Perfect speaker turns (ceiling for the naming step) | 3% |
+| Step (measured in this order) | Test set | Words with the wrong speaker |
+| --- | --- | --- |
+| WeSpeaker voiceprints, sherpa-onnx diarizer, threshold 3.0 | 8 busy | 62% |
+| TitaNet voiceprints (WeSpeaker collapses on distant voices: 28% vs 4% EER) | 8 busy | 57% |
+| Threshold 1.5 (3.0 sent almost everyone to "unknown") | 8 busy | 29% |
+| + calendar hints | 8 busy | 21% |
+| Constrained chunk diarizer (3x faster, same accuracy) | 24 busy | 23% |
+| + per-sample s-norm, mixed-room cohort, threshold 2.5 | 24 busy / 12 quiet | **22% / 20%** |
+| Perfect speaker turns (ceiling for the naming step) | 8 busy | 3% |
 
-What each part is worth (busy room, priors on): per-sample s-norm 34% → 23%;
-gallery of many voiceprints instead of one average 27% → 23%; calendar hints
-29% → 23%; wearer loudness bonus ~0 (the wearer is already easy).
+Ablations on the 24 busy conversations, measured before the per-sample s-norm
+change: without s-norm 34% (vs 23%), one averaged voiceprint per person
+instead of a gallery 29%, no calendar hints 29%, no wearer loudness bonus 23%
+(no effect, since the wearer is already easy). Strangers labeled as a known
+person: 9% of their speech time busy, 3% quiet.
 
 **The bottleneck is segmentation, not naming.** With perfect turns the naming
 step mislabels 3% of words. The free pyannote 3.0 segmentation model gets only
