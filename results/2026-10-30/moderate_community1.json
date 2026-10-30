@@ -1,0 +1,172 @@
+{
+  "config": {
+    "seed": 0,
+    "conversations": 12,
+    "embedding": "titanet",
+    "segmentation": "pyannote3",
+    "diarizer": "community1",
+    "profile": "moderate",
+    "cluster_threshold": 0.5,
+    "threshold": 2.5,
+    "top_k": 3,
+    "gallery_size": 20,
+    "mean_gallery": false,
+    "no_snorm": false,
+    "no_wearer": false,
+    "wearer_weight": 1.5,
+    "priors": true,
+    "unknown_merge": 0.6,
+    "refine": false,
+    "switch_penalty": 2.0,
+    "prior_weight_refine": 1.0,
+    "enroll_seconds": 45,
+    "wearer_enroll_seconds": 150,
+    "out": "results/moderate_community1.json"
+  },
+  "summary": {
+    "der_raw": 0.2838826324485347,
+    "der": 0.2838826324485347,
+    "ider": 0.3858953105993021,
+    "wder": 0.3148732712702173,
+    "far": 0.09043402497764236,
+    "escalate": 0.4166666666666667,
+    "speaker_count_exact": 0.4166666666666667,
+    "clusters_per_conv": 2.3333333333333335,
+    "audio_minutes": 20.52344479166667,
+    "diarize_seconds": 1200.1106469631195
+  },
+  "per_conversation": [
+    {
+      "der_raw": 0.07641538620191812,
+      "der": 0.07641538620191812,
+      "ider": 0.07641538620191812,
+      "wder": 0.11192214111922141,
+      "far": 0.0,
+      "escalate": false,
+      "n_ref": 2,
+      "n_hyp": 2,
+      "n_clusters": 2
+    },
+    {
+      "der_raw": 0.27525048946216746,
+      "der": 0.27525048946216746,
+      "ider": 0.2944834734538754,
+      "wder": 0.2675324675324675,
+      "far": 0.0,
+      "escalate": false,
+      "n_ref": 3,
+      "n_hyp": 2,
+      "n_clusters": 2
+    },
+    {
+      "der_raw": 0.6272812955188073,
+      "der": 0.6272812955188073,
+      "ider": 0.9990574929311969,
+      "wder": 0.6457883369330454,
+      "far": 0.06251436451390485,
+      "escalate": true,
+      "n_ref": 3,
+      "n_hyp": 2,
+      "n_clusters": 2
+    },
+    {
+      "der_raw": 0.4444117935155255,
+      "der": 0.4444117935155255,
+      "ider": 0.6463904398080126,
+      "wder": 0.6581395348837209,
+      "far": 0.0,
+      "escalate": true,
+      "n_ref": 4,
+      "n_hyp": 2,
+      "n_clusters": 2
+    },
+    {
+      "der_raw": 0.13862053471130084,
+      "der": 0.13862053471130084,
+      "ider": 0.13862053471130084,
+      "wder": 0.13740458015267176,
+      "far": 0.0,
+      "escalate": false,
+      "n_ref": 2,
+      "n_hyp": 2,
+      "n_clusters": 2
+    },
+    {
+      "der_raw": 0.23939973814079968,
+      "der": 0.23939973814079968,
+      "ider": 0.23939973814079968,
+      "wder": 0.21634615384615385,
+      "far": 0.0,
+      "escalate": false,
+      "n_ref": 3,
+      "n_hyp": 2,
+      "n_clusters": 2
+    },
+    {
+      "der_raw": 0.09531933041902121,
+      "der": 0.09531933041902121,
+      "ider": 0.5616803497174538,
+      "wder": 0.07004830917874397,
+      "far": 0.029510395707578806,
+      "escalate": true,
+      "n_ref": 3,
+      "n_hyp": 3,
+      "n_clusters": 3
+    },
+    {
+      "der_raw": 0.2815070015559013,
+      "der": 0.2815070015559013,
+      "ider": 0.2815070015559013,
+      "wder": 0.29562982005141386,
+      "far": 0.0,
+      "escalate": false,
+      "n_ref": 4,
+      "n_hyp": 3,
+      "n_clusters": 3
+    },
+    {
+      "der_raw": 0.4710528850785088,
+      "der": 0.4710528850785088,
+      "ider": 0.4820344860803391,
+      "wder": 0.5011600928074246,
+      "far": 0.0,
+      "escalate": true,
+      "n_ref": 2,
+      "n_hyp": 2,
+      "n_clusters": 2
+    },
+    {
+      "der_raw": 0.08853754940711463,
+      "der": 0.08853754940711463,
+      "ider": 0.08853754940711463,
+      "wder": 0.08181818181818182,
+      "far": 0.0,
+      "escalate": false,
+      "n_ref": 3,
+      "n_hyp": 3,
+      "n_clusters": 3
+    },
+    {
+      "der_raw": 0.31241386621435385,
+      "der": 0.31241386621435385,
+      "ider": 0.46623555602671474,
+      "wder": 0.42318059299191374,
+      "far": 0.9931835395102246,
+      "escalate": true,
+      "n_ref": 3,
+      "n_hyp": 2,
+      "n_clusters": 2
+    },
+    {
+      "der_raw": 0.3563817191569974,
+      "der": 0.3563817191569974,
+      "ider": 0.3563817191569974,
+      "wder": 0.3695090439276486,
+      "far": 0.0,
+      "escalate": false,
+      "n_ref": 4,
+      "n_hyp": 3,
+      "n_clusters": 3
+    }
+  ]
+}

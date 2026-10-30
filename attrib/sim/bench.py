@@ -33,6 +33,8 @@ SEGMENTATION = {
     "reverb2": "models/sherpa-onnx-reverb-diarization-v2/model.int8.onnx",
     # DiariZen WavLM-large-s80-md, ONNX export (christopherthompson81/diarizen_onnx). CC-BY-NC-4.0.
     "diarizen": "models/diarizen-onnx/diarizen_segmentation.onnx",
+    # community-1's own segmentation checkpoint (retrained, differs from 3.0), run via pyannote.audio.
+    "community1": "models/pyannote-community-1/segmentation",
 }
 # Full pyannote pipelines, downloaded from Hugging Face (community-1 is gated).
 PIPELINES = {"community1": "models/pyannote-community-1"}
@@ -100,7 +102,7 @@ def diarized(args, convs, emb):
     """Diarization is the slow part, so cache it per embedding model and threshold."""
     if args.diarizer == "chunk":
         d = ChunkDiarizer(SEGMENTATION[args.segmentation], emb, threshold=args.cluster_threshold,
-                          seg_meta=KNOWN_META.get(args.segmentation))
+                          seg_meta=KNOWN_META.get(args.segmentation), speech_bias=args.speech_bias)
     elif args.diarizer in PIPELINES:
         d = PyannoteDiarizer(PIPELINES[args.diarizer], emb)
     else:
@@ -108,6 +110,7 @@ def diarized(args, convs, emb):
     out = []
     seg = "" if args.segmentation == "pyannote3" or args.diarizer in PIPELINES else "_" + args.segmentation
     seg += "" if args.diarizer == "sherpa" else "_" + args.diarizer
+    seg += f"_sb{args.speech_bias}" if args.speech_bias else ""
     for i, c in enumerate(convs):
         tag = "" if args.profile == "hard" else args.profile
         key = f"diar{args.seed}{tag}_{i}_{args.embedding}_{args.cluster_threshold}{seg}"
@@ -181,6 +184,8 @@ def main():
     ap.add_argument("--diarizer", choices=["sherpa", "chunk", *PIPELINES], default="chunk")
     ap.add_argument("--profile", choices=["hard", "moderate"], default="hard")
     ap.add_argument("--cluster-threshold", type=float, default=0.5)
+    ap.add_argument("--speech-bias", type=float, default=0.0,
+                    help="lower the segmenter's silence score by this much (log-prob units)")
     ap.add_argument("--threshold", type=float, default=2.5)
     ap.add_argument("--top-k", type=int, default=3)
     ap.add_argument("--gallery-size", type=int, default=20)

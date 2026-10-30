@@ -66,9 +66,13 @@ person: 9% of their speech time busy, 3% quiet.
 **The bottleneck is segmentation, not naming.** With perfect turns the naming
 step mislabels 3% of words. The free pyannote 3.0 segmentation model gets only
 89% of its window-level speaker units clean, and most of the rest fuse two
-distant people. A better segmenter (pyannote community-1, DiariZen, or
-pyannoteAI Precision-2) is the next lever. Hugging Face is blocked in the
-build environment, so those haven't been tested. Rev's reverb-diarization
+distant people. pyannote community-1 and DiariZen were tested on
+2026-10-30 (details in `results/2026-10-30/REPORT.md`). Neither beats the
+baseline in busy rooms: community-1's segmenter makes the same decisions as
+3.0 and its WeSpeaker/VBx clustering merges people (29% busy, 31% quiet).
+DiariZen separates speakers better but drops a quarter of busy-room speech as
+silence (25% busy at best), while it is the best in quiet rooms (14% vs 19%).
+Its weights are non-commercial (CC-BY-NC-4.0). Rev's reverb-diarization
 v1/v2 were worse here and are non-production licensed anyway.
 
 **Silence gating** (31 simulated minutes, 41% speech):

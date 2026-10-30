@@ -9,6 +9,8 @@ sound alike are then kept apart whenever they ever talk in the same window.
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.optimize import linear_sum_assignment
@@ -22,7 +24,9 @@ from .types import Turn
 # Models exported without pyannote's metadata (window in samples).
 KNOWN_META = {
     # DiariZen WavLM-large-s80-md: 16 s windows, 4 speakers, at most 2 at once.
-    "diarizen": {"window_size": 16 * SR, "num_speakers": 4, "num_classes": 11, "powerset_max_classes": 2},
+    # The export's batch size is fixed at 1 (batch 2 fails inside the graph).
+    "diarizen": {"window_size": 16 * SR, "num_speakers": 4, "num_classes": 11, "powerset_max_classes": 2,
+                 "batch": 1},
 }
 
 
@@ -39,12 +43,53 @@ class SegmentationModel:
         self.num_classes = int(meta["num_classes"])
         self.mapping = _powerset(self.num_classes, self.num_speakers, int(meta["powerset_max_classes"]))
         self.rank = len(self.sess.get_inputs()[0].shape)
+        self.max_batch = int(meta.get("batch", 0))
 
-    def __call__(self, chunks: np.ndarray) -> np.ndarray:
+    def __call__(self, chunks: np.ndarray, speech_bias: float = 0.0) -> np.ndarray:
         """(N, window) audio -> (N, frames, speakers) binary activity."""
+        return self.binarize(self.scores(chunks), speech_bias)
+
+    def scores(self, chunks: np.ndarray) -> np.ndarray:
+        """(N, window) audio -> (N, frames, powerset classes) scores."""
+        if self.max_batch:
+            return np.concatenate([self._run(chunks[i: i + self.max_batch])
+                                   for i in range(0, len(chunks), self.max_batch)])
+        return self._run(chunks)
+
+    def binarize(self, y: np.ndarray, speech_bias: float = 0.0) -> np.ndarray:
+        """speech_bias > 0 lowers the bar for calling a frame speech (class 0 is silence)."""
+        if speech_bias:
+            y = y.copy()
+            y[..., 0] -= speech_bias
+        return self.mapping[y.argmax(-1)]
+
+    def _run(self, chunks: np.ndarray) -> np.ndarray:
         x = chunks[:, None, :] if self.rank == 3 else chunks
         (y,) = self.sess.run(None, {self.sess.get_inputs()[0].name: x.astype(np.float32)})
-        return self.mapping[y.argmax(-1)]
+        return y
+
+
+class TorchSegmentationModel(SegmentationModel):
+    """A pyannote.audio segmentation checkpoint directory (e.g. community-1's)."""
+
+    def __init__(self, path: str, threads: int = 4, meta: dict | None = None):
+        import torch
+        from pyannote.audio import Model
+
+        torch.set_num_threads(threads)
+        self.model = Model.from_pretrained(path).eval()
+        spec = self.model.specifications
+        self.window = int(spec.duration * SR)
+        self.num_speakers = len(spec.classes)
+        self.num_classes = self.model.dimension
+        self.mapping = _powerset(self.num_classes, self.num_speakers, spec.powerset_max_classes)
+        self.max_batch = 0
+
+    def _run(self, chunks: np.ndarray) -> np.ndarray:
+        import torch
+
+        with torch.no_grad():
+            return self.model(torch.from_numpy(chunks[:, None, :].astype(np.float32))).numpy()
 
 
 def _powerset(num_classes, num_speakers, max_classes):
@@ -64,8 +109,10 @@ def _powerset(num_classes, num_speakers, max_classes):
 class ChunkDiarizer(Diarizer):
     def __init__(self, segmentation_model: str, embedder: Embedder, threshold: float = 0.6,
                  hop: float = 2.0, min_active: float = 0.5, min_duration_on: float = 0.3,
-                 min_duration_off: float = 0.3, batch: int = 32, seg_meta: dict | None = None):
-        self.seg = SegmentationModel(segmentation_model, meta=seg_meta)
+                 min_duration_off: float = 0.3, batch: int = 32, seg_meta: dict | None = None,
+                 speech_bias: float = 0.0):
+        cls = TorchSegmentationModel if os.path.isdir(segmentation_model) else SegmentationModel
+        self.seg = cls(segmentation_model, meta=seg_meta)
         self.embedder = embedder
         self.threshold = threshold        # cosine distance cut for clustering
         self.hop = int(hop * SR)
@@ -73,15 +120,20 @@ class ChunkDiarizer(Diarizer):
         self.min_on = min_duration_on
         self.min_off = min_duration_off
         self.batch = batch
+        self.speech_bias = speech_bias
 
     def _segment(self, x: np.ndarray):
+        pad, scores = self._scores(x)
+        return pad, self.seg.binarize(scores, self.speech_bias)  # acts: (n, F, S)
+
+    def _scores(self, x: np.ndarray):
         W = self.seg.window
         n = max(1, int(np.ceil(max(len(x) - W, 0) / self.hop)) + 1)
         pad = np.zeros((n - 1) * self.hop + W, np.float32)
         pad[: len(x)] = x
         chunks = np.stack([pad[i * self.hop: i * self.hop + W] for i in range(n)])
-        acts = np.concatenate([self.seg(chunks[i: i + self.batch]) for i in range(0, n, self.batch)])
-        return pad, acts  # acts: (n, F, S)
+        scores = np.concatenate([self.seg.scores(chunks[i: i + self.batch]) for i in range(0, n, self.batch)])
+        return pad, scores
 
     def turns(self, x: np.ndarray) -> list[Turn]:
         pad, acts = self._segment(x)
