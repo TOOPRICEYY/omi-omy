@@ -106,3 +106,23 @@ def overlap_ratio(turns: list[Turn]) -> float:
 
 
 __all__ = ["Cluster", "Diarizer", "overlap_ratio", "l2norm"]
+
+
+class PyannoteDiarizer(Diarizer):
+    """A full pyannote.audio pipeline (e.g. community-1: VBx clustering + PLDA)
+    for turns; our embedder still makes the voiceprints used for naming."""
+
+    def __init__(self, pipeline_dir: str, embedder: Embedder, threads: int = 4):
+        import torch
+        from pyannote.audio import Pipeline
+
+        torch.set_num_threads(threads)
+        self.pipe = Pipeline.from_pretrained(pipeline_dir)
+        self.embedder = embedder
+
+    def turns(self, x: np.ndarray) -> list[Turn]:
+        import torch
+
+        out = self.pipe({"waveform": torch.from_numpy(x.astype(np.float32))[None], "sample_rate": SR})
+        ann = getattr(out, "speaker_diarization", out)
+        return [Turn(s.start, s.end, f"S{spk}") for s, _, spk in ann.itertracks(yield_label=True)]

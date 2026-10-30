@@ -19,23 +19,31 @@ from .embed import Embedder, l2norm
 from .types import Turn
 
 
+# Models exported without pyannote's metadata (window in samples).
+KNOWN_META = {
+    # DiariZen WavLM-large-s80-md: 16 s windows, 4 speakers, at most 2 at once.
+    "diarizen": {"window_size": 16 * SR, "num_speakers": 4, "num_classes": 11, "powerset_max_classes": 2},
+}
+
+
 class SegmentationModel:
-    def __init__(self, path: str, threads: int = 2):
+    def __init__(self, path: str, threads: int = 4, meta: dict | None = None):
         import onnxruntime as ort
 
         so = ort.SessionOptions()
         so.intra_op_num_threads = threads
         self.sess = ort.InferenceSession(path, sess_options=so, providers=["CPUExecutionProvider"])
-        meta = self.sess.get_modelmeta().custom_metadata_map
+        meta = meta or self.sess.get_modelmeta().custom_metadata_map
         self.window = int(meta["window_size"])
-        self.rf_shift = int(meta["receptive_field_shift"])
         self.num_speakers = int(meta["num_speakers"])
         self.num_classes = int(meta["num_classes"])
         self.mapping = _powerset(self.num_classes, self.num_speakers, int(meta["powerset_max_classes"]))
+        self.rank = len(self.sess.get_inputs()[0].shape)
 
     def __call__(self, chunks: np.ndarray) -> np.ndarray:
         """(N, window) audio -> (N, frames, speakers) binary activity."""
-        (y,) = self.sess.run(None, {self.sess.get_inputs()[0].name: chunks[:, None, :].astype(np.float32)})
+        x = chunks[:, None, :] if self.rank == 3 else chunks
+        (y,) = self.sess.run(None, {self.sess.get_inputs()[0].name: x.astype(np.float32)})
         return self.mapping[y.argmax(-1)]
 
 
@@ -56,8 +64,8 @@ def _powerset(num_classes, num_speakers, max_classes):
 class ChunkDiarizer(Diarizer):
     def __init__(self, segmentation_model: str, embedder: Embedder, threshold: float = 0.6,
                  hop: float = 2.0, min_active: float = 0.5, min_duration_on: float = 0.3,
-                 min_duration_off: float = 0.3, batch: int = 32):
-        self.seg = SegmentationModel(segmentation_model)
+                 min_duration_off: float = 0.3, batch: int = 32, seg_meta: dict | None = None):
+        self.seg = SegmentationModel(segmentation_model, meta=seg_meta)
         self.embedder = embedder
         self.threshold = threshold        # cosine distance cut for clustering
         self.hop = int(hop * SR)

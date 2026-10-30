@@ -15,7 +15,8 @@ import numpy as np
 
 from ..align import assign_words
 from ..chunkdiar import ChunkDiarizer
-from ..diarize import Diarizer
+from ..chunkdiar import KNOWN_META
+from ..diarize import Diarizer, PyannoteDiarizer
 from ..embed import Embedder
 from ..identify import Gallery, Identifier, IdentifyConfig, final_labels
 from ..metrics import der, false_accept_rate, identification_error, word_speaker_error
@@ -30,7 +31,11 @@ SEGMENTATION = {
     # Rev's fine-tunes: non-production license (personal and research use only).
     "reverb1": "models/sherpa-onnx-reverb-diarization-v1/model.onnx",
     "reverb2": "models/sherpa-onnx-reverb-diarization-v2/model.int8.onnx",
+    # DiariZen WavLM-large-s80-md, ONNX export (christopherthompson81/diarizen_onnx). CC-BY-NC-4.0.
+    "diarizen": "models/diarizen-onnx/diarizen_segmentation.onnx",
 }
+# Full pyannote pipelines, downloaded from Hugging Face (community-1 is gated).
+PIPELINES = {"community1": "models/pyannote-community-1"}
 SEG = SEGMENTATION["pyannote3"]
 EMBEDDINGS = {
     "wespeaker": "models/wespeaker_en_voxceleb_resnet34_LM.onnx",
@@ -94,11 +99,14 @@ def calendar_priors(world: World, cast: list[str], rng: random.Random, accuracy:
 def diarized(args, convs, emb):
     """Diarization is the slow part, so cache it per embedding model and threshold."""
     if args.diarizer == "chunk":
-        d = ChunkDiarizer(SEGMENTATION[args.segmentation], emb, threshold=args.cluster_threshold)
+        d = ChunkDiarizer(SEGMENTATION[args.segmentation], emb, threshold=args.cluster_threshold,
+                          seg_meta=KNOWN_META.get(args.segmentation))
+    elif args.diarizer in PIPELINES:
+        d = PyannoteDiarizer(PIPELINES[args.diarizer], emb)
     else:
         d = Diarizer(SEGMENTATION[args.segmentation], emb, threshold=args.cluster_threshold)
     out = []
-    seg = "" if args.segmentation == "pyannote3" else "_" + args.segmentation
+    seg = "" if args.segmentation == "pyannote3" or args.diarizer in PIPELINES else "_" + args.segmentation
     seg += "" if args.diarizer == "sherpa" else "_" + args.diarizer
     for i, c in enumerate(convs):
         tag = "" if args.profile == "hard" else args.profile
@@ -170,7 +178,7 @@ def main():
     ap.add_argument("--conversations", type=int, default=12)
     ap.add_argument("--embedding", choices=list(EMBEDDINGS), default="titanet")
     ap.add_argument("--segmentation", choices=list(SEGMENTATION), default="pyannote3")
-    ap.add_argument("--diarizer", choices=["sherpa", "chunk"], default="chunk")
+    ap.add_argument("--diarizer", choices=["sherpa", "chunk", *PIPELINES], default="chunk")
     ap.add_argument("--profile", choices=["hard", "moderate"], default="hard")
     ap.add_argument("--cluster-threshold", type=float, default=0.5)
     ap.add_argument("--threshold", type=float, default=2.5)
