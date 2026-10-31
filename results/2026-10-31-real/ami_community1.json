@@ -1,0 +1,110 @@
+{
+  "config": {
+    "parquet_dir": "data/ami",
+    "libri": "data/librispeech/validation.clean.parquet",
+    "start": 300.0,
+    "minutes": 10.0,
+    "embedding": "titanet",
+    "segmentation": "pyannote3",
+    "diarizer": "community1",
+    "cluster_threshold": 0.5,
+    "speech_bias": 0.0,
+    "threshold": 2.5,
+    "gallery_size": 20,
+    "enroll_seconds": 45,
+    "priors": true,
+    "out": "results/real/ami_community1.json"
+  },
+  "summary": {
+    "der": 0.1807307719774432,
+    "miss": 0.10556920338509748,
+    "fa": 0.03171109235128523,
+    "confusion": 0.043450476241060465,
+    "ider": 0.1807307719774432,
+    "n_clusters": 4.0,
+    "audio_minutes": 80.0,
+    "diarize_seconds": 4966.222119569778
+  },
+  "per_meeting": [
+    {
+      "meeting": "EN2002b@300",
+      "der": 0.19733837640960986,
+      "miss": 0.12200042025635638,
+      "fa": 0.027078517895916508,
+      "confusion": 0.04825943825733697,
+      "ider": 0.19733837640960986,
+      "n_ref": 4,
+      "n_clusters": 4
+    },
+    {
+      "meeting": "EN2002d@300",
+      "der": 0.25093825703849676,
+      "miss": 0.15152694272552686,
+      "fa": 0.02868116833398185,
+      "confusion": 0.07073014597898807,
+      "ider": 0.25093825703849676,
+      "n_ref": 4,
+      "n_clusters": 3
+    },
+    {
+      "meeting": "ES2004b@300",
+      "der": 0.1753297723661287,
+      "miss": 0.09113012846284915,
+      "fa": 0.03375260850420232,
+      "confusion": 0.05044703539907721,
+      "ider": 0.1753297723661287,
+      "n_ref": 4,
+      "n_clusters": 5
+    },
+    {
+      "meeting": "ES2004d@300",
+      "der": 0.22136782423812898,
+      "miss": 0.15320694542877392,
+      "fa": 0.03586109142452162,
+      "confusion": 0.03229978738483345,
+      "ider": 0.22136782423812898,
+      "n_ref": 4,
+      "n_clusters": 4
+    },
+    {
+      "meeting": "IS1009b@300",
+      "der": 0.1128341645685328,
+      "miss": 0.04475840723575541,
+      "fa": 0.02477668906457976,
+      "confusion": 0.043299068268197634,
+      "ider": 0.1128341645685328,
+      "n_ref": 4,
+      "n_clusters": 4
+    },
+    {
+      "meeting": "IS1009d@300",
+      "der": 0.17660344037086723,
+      "miss": 0.07811306016403742,
+      "fa": 0.04323388069079115,
+      "confusion": 0.05525649951603865,
+      "ider": 0.17660344037086723,
+      "n_ref": 4,
+      "n_clusters": 4
+    },
+    {
+      "meeting": "TS3003b@300",
+      "der": 0.09239047473668142,
+      "miss": 0.043829186383758205,
+      "fa": 0.03354449702335521,
+      "confusion": 0.015016791329568005,
+      "ider": 0.09239047473668142,
+      "n_ref": 4,
+      "n_clusters": 4
+    },
+    {
+      "meeting": "TS3003d@300",
+      "der": 0.2190438660910996,
+      "miss": 0.15998853642372243,
+      "fa": 0.02676028587293342,
+      "confusion": 0.03229504379444375,
+      "ider": 0.2190438660910996,
+      "n_ref": 4,
+      "n_clusters": 4
+    }
+  ]
+}

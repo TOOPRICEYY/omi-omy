@@ -72,7 +72,20 @@ baseline in busy rooms: community-1's segmenter makes the same decisions as
 3.0 and its WeSpeaker/VBx clustering merges people (29% busy, 31% quiet).
 DiariZen separates speakers better but drops a quarter of busy-room speech as
 silence (25% busy at best), while it is the best in quiet rooms (14% vs 19%).
-Its weights are non-commercial (CC-BY-NC-4.0). Rev's reverb-diarization
+Its weights are non-commercial (CC-BY-NC-4.0).
+
+**Real speech reverses that ranking** (`results/2026-10-31-real/REPORT.md`).
+The simulator's TTS voices sit about twice as close together as real voices
+(TitaNet nearest-other-speaker similarity 0.70 vs 0.36), which makes clustering
+look much harder than it is. On 80 minutes of real AMI meetings (table mic,
+16 people, enrolled from their other meetings), speech named wrong is: baseline
+21.1%, community-1 18.1%, DiariZen 16.5%. community-1 is the best choice that can
+be used commercially. Run it with:
+
+```bash
+# AMI SDM test split and LibriSpeech dev-clean (for the s-norm cohort), from Hugging Face
+python -m attrib.real.ami --priors --diarizer community1
+``` Rev's reverb-diarization
 v1/v2 were worse here and are non-production licensed anyway.
 
 **Silence gating** (31 simulated minutes, 41% speech):

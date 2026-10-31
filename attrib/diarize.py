@@ -54,6 +54,9 @@ class Diarizer:
             pieces = [x[int(a * SR): int(b * SR)] for a, b in clean if b - a >= 0.3]
             if not pieces:
                 pieces = [x[int(t.start * SR): int(t.end * SR)] for t in ts]
+            # TitaNet's ONNX export fails on inputs over ~123 s, so cut long turns.
+            step = int(max_pool * SR)
+            pieces = [p[i: i + step] for p in pieces for i in range(0, len(p), step)]
             # Longest pieces first so the pooled voiceprint uses the best audio.
             pieces.sort(key=len, reverse=True)
             pooled, total = [], 0.0
