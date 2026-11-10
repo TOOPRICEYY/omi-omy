@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Omi Omy</title>
+<style>
+  :root { --bg:#fbfaf8; --fg:#1d1c1a; --mut:#6d6a64; --line:#e4e0d8; --card:#fff; --acc:#b4532a; --unk:#8a6d1f; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161513; --fg:#ece9e3; --mut:#9a968e; --line:#33302b; --card:#1f1d1a; --acc:#e08a5f; --unk:#d4b55a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 -apple-system, system-ui, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 20px 16px 60px; display:grid; gap:20px; grid-template-columns: 300px 1fr; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+  h1 { font-size:18px; margin:0 0 4px; } h2 { font-size:14px; margin:18px 0 8px; color:var(--mut); font-weight:600; }
+  .status { color:var(--mut); font-size:13px; margin-bottom:10px; }
+  .item { display:block; width:100%; text-align:left; background:var(--card); color:inherit; border:1px solid var(--line);
+          border-radius:8px; padding:8px 10px; margin-bottom:6px; cursor:pointer; font:inherit; }
+  .item.sel { border-color:var(--acc); }
+  .item small { color:var(--mut); display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:12px; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding:6px 0; border-top:1px solid var(--line); }
+  .row:first-child { border-top:0; }
+  .name { font-weight:600; min-width:110px; } .unk { color:var(--unk); }
+  .mut { color:var(--mut); font-size:13px; }
+  input[type=text] { background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 8px; font:inherit; width:150px; }
+  button.b { background:var(--acc); color:#fff; border:0; border-radius:6px; padding:5px 10px; font:inherit; cursor:pointer; }
+  button.g { background:transparent; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 10px; font:inherit; cursor:pointer; }
+  .seg { padding:5px 0; } .seg b { margin-right:6px; } .seg .t { color:var(--mut); font-size:12px; margin-right:6px; font-variant-numeric: tabular-nums; }
+  .err { color:#c0392b; }
+</style>
+</head>
+<body>
+<main>
+  <section>
+    <h1>Omi Omy</h1>
+    <div class="status" id="status">Loading…</div>
+    <h2>Conversations</h2>
+    <div id="list"></div>
+    <h2>People</h2>
+    <div class="card" id="people"></div>
+    <div class="card">
+      <div class="mut">Enroll from a recording of one person talking (30 s or more).</div>
+      <div class="row"><input type="text" id="en" placeholder="Name"><input type="file" id="ef" accept="audio/*"></div>
+      <div class="row"><button class="b" id="eb">Enroll</button><span class="mut" id="em"></span></div>
+    </div>
+  </section>
+  <section id="detail"><div class="mut">Pick a conversation.</div></section>
+</main>
+<datalist id="names"></datalist>
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+const fmt = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+const when = (ts) => ts ? new Date(ts * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "";
+let current = null;
+const player = new Audio();
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+}
+async function refresh() {
+  const h = await api("/health");
+  $("#status").textContent =
+    (h.recording.length ? "Recording now. " : "Idle. ") +
+    (h.processing ? `Processing ${h.processing}. ` : "") + (h.queued ? `${h.queued} queued. ` : "") +
+    (h.transcription ? "" : "No transcription key set. ");
+  if (h.last_error) $("#status").innerHTML += `<div class="err">${esc(h.last_error)}</div>`;
+  const convs = await api("/api/conversations");
+  $("#list").innerHTML = convs.map((c) => `<button class="item ${c.id === current ? "sel" : ""}" data-id="${esc(c.id)}">
+      ${esc(when(c.started_at))} · ${fmt(c.duration)}
+      <small>${esc(c.speakers.map((s) => s.name).join(", "))}</small><small>${esc(c.preview)}</small></button>`).join("")
+    || `<div class="mut">Nothing yet.</div>`;
+  const people = await api("/api/people");
+  $("#people").innerHTML = people.map((p) => `<div class="row"><span class="name">${esc(p.name)}</span>
+      <span class="mut">${p.voiceprints} voiceprints</span>
+      <button class="g" data-forget="${esc(p.name)}">Forget</button></div>`).join("") || `<div class="mut">Nobody enrolled yet.</div>`;
+  $("#names").innerHTML = people.map((p) => `<option value="${esc(p.name)}">`).join("");
+}
+function show(d) {
+  current = d.id;
+  $("#detail").innerHTML = `<h1>${esc(when(d.started_at))}</h1>
+    <div class="status">${fmt(d.duration)} long, ${fmt(d.speech_seconds)} of speech${d.error ? ` · <span class="err">${esc(d.error)}</span>` : ""}</div>
+    <div class="card">${d.speakers.map((s, i) => `<div class="row">
+        <span class="name ${s.known ? "" : "unk"}">${esc(s.name)}</span>
+        <span class="mut">${fmt(s.speech_seconds)}${s.known ? ` · ${Math.round(s.confidence * 100)}%` : ""}</span>
+        <button class="g" data-play="${s.sample[0]},${s.sample[1]}">Play</button>
+        <input type="text" list="names" placeholder="${s.known ? "Rename" : "Who is this?"}" data-in="${i}">
+        <button class="b" data-label="${esc(s.name)}" data-i="${i}">Save</button></div>`).join("")}</div>
+    <div class="card">${d.segments.map((s) => `<div class="seg"><span class="t">${fmt(s.start)}</span>
+        <b class="${s.speaker.startsWith("unknown") ? "unk" : ""}">${esc(s.speaker)}</b>${esc(s.text) || '<span class="mut">(no transcript)</span>'}</div>`).join("")}</div>`;
+}
+document.addEventListener("click", async (e) => {
+  const t = e.target.closest("button");
+  if (!t) return;
+  try {
+    if (t.dataset.id) { show(await api(`/api/conversations/${t.dataset.id}`)); refresh(); }
+    else if (t.dataset.play) {
+      const [a, b] = t.dataset.play.split(",");
+      player.src = `/api/conversations/${current}/audio?start=${a}&end=${b}`; player.play();
+    } else if (t.dataset.label) {
+      const person = document.querySelector(`[data-in="${t.dataset.i}"]`).value.trim();
+      if (!person) return;
+      show(await api(`/api/conversations/${current}/label`, { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ speaker: t.dataset.label, person, learn: true }) }));
+      refresh();
+    } else if (t.dataset.forget) {
+      if (confirm(`Forget ${t.dataset.forget}'s voice?`)) { await api(`/api/people/${encodeURIComponent(t.dataset.forget)}`, { method: "DELETE" }); refresh(); }
+    } else if (t.id === "eb") {
+      const name = $("#en").value.trim(), f = $("#ef").files[0];
+      if (!name || !f) return;
+      const fd = new FormData(); fd.append("file", f);
+      $("#em").textContent = "Working…";
+      const r = await api(`/api/people/${encodeURIComponent(name)}/enroll`, { method: "POST", body: fd });
+      $("#em").textContent = `Added ${r.added} voiceprints.`; refresh();
+    }
+  } catch (err) { alert(err.message); }
+});
+refresh(); setInterval(refresh, 10000);
+</script>
+</body>
+</html>

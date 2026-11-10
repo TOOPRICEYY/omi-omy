@@ -17,7 +17,8 @@ pendant energy gate -> phone Silero VAD -> pack speech -> MAI Transcribe 2 (no d
 | Module | What it does |
 | --- | --- |
 | `attrib/vad.py` | `EnergyGate` (cheap pendant gate), `SileroVAD` (phone), `pack` + `TimeMap` (speech-only upload, timestamps mapped back) |
-| `attrib/transcribe.py` | MAI Transcribe 2 REST client, word timestamps, `phraseList` from enrolled names |
+| `attrib/transcribe.py` | MAI Transcribe 2 client (OpenRouter), word timestamps, long audio cut at quiet points |
+| `omibridge/` | Service for the Omi app: audio webhook, conversation cutting, review page, voice naming |
 | `attrib/chunkdiar.py` | Diarizer: 10 s segmentation windows, one TitaNet voiceprint per window speaker, clustering with "same window = different people" constraints |
 | `attrib/diarize.py` | sherpa-onnx diarizer (baseline) and per-speaker voiceprint pooling |
 | `attrib/identify.py` | Gallery, per-sample adaptive s-norm, calendar priors, open-set threshold, unknown-voice tracking |
@@ -37,9 +38,39 @@ python -m attrib.sim.bench --conversations 24 --priors      # accuracy
 python -m attrib.sim.gate_bench                             # pendant gate + VAD
 ```
 
-The MAI client reads `AZURE_SPEECH_ENDPOINT` and `AZURE_SPEECH_KEY`. Its
-response parser follows the documented fast-transcription schema and has not
-been run against a live key yet.
+The transcription client reads `OPENROUTER_API_KEY` and calls
+`microsoft/mai-transcribe-2` (word timestamps, about $0.10 per audio hour).
+
+## Omi bridge (`omibridge/`)
+
+Runs next to the stock Omi app, no fork needed. The app's developer setting
+"Realtime audio bytes" posts the pendant's raw audio to the bridge. The bridge
+cuts it into conversations (closed after 2 minutes without speech), transcribes
+with MAI Transcribe 2 through OpenRouter, diarizes with DiariZen + TitaNet, and
+names the speakers it knows. A local review page lists conversations, plays a
+clip of each unknown voice, and lets you name it. Naming a voice adds it to the
+gallery, so later conversations recognize that person.
+
+```bash
+scripts/install_mac.sh              # venv, models, .env with a random webhook token, tests
+# add OPENROUTER_API_KEY to .env
+.venv/bin/python -m omibridge       # webhook on :8377, review page on http://127.0.0.1:8378/
+scripts/install_mac.sh --launchd    # optional: keep it running with launchd
+```
+
+Two ports on purpose. Port 8377 serves only `POST /omi/audio/<token>` and is the
+one to expose (for example through a Cloudflare tunnel) so the phone can reach
+it. Port 8378 has the review page and the transcripts, and listens on loopback
+only. In the Omi app set Settings > Developer Mode > Realtime audio bytes to
+`https://<your-host>/omi/audio/<OMIBRIDGE_TOKEN>`.
+
+Data stays in `data/bridge/`: `conversations/<id>/` holds `audio.flac`,
+`conversation.json` (speakers and transcript lines) and the voiceprints needed
+to rename speakers later; `gallery.npz` holds the enrolled people.
+
+Not verified yet: writing conversations back into Omi (`omibridge/omi_api.py`).
+It is off unless `OMI_API_KEY` is set. DiariZen's weights are CC-BY-NC-4.0, so
+this setup is for personal use.
 
 ## Results so far (simulated audio, 2026-10-29)
 

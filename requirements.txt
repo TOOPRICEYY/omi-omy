@@ -5,6 +5,11 @@ onnxruntime>=1.18
 sherpa-onnx>=1.12,<2  # 2.x dropped the espeak frontend the simulator's TTS needs
 silero-vad>=5.1
 requests>=2.31
+# bridge service
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9
 # simulation and tests only
+httpx>=0.27
 pyroomacoustics>=0.7
 pytest>=8

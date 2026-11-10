@@ -4,3 +4,10 @@ data/sim/
 __pycache__/
 *.pyc
 .pytest_cache/
+.env
+data/bridge/
+data/ami/
+data/librispeech/
+results/real/
+launchd/
+logs/

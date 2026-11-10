@@ -5,7 +5,7 @@ from attrib.diarize import Cluster, overlap_ratio
 from attrib.embed import l2norm
 from attrib.identify import Gallery, Identifier, IdentifyConfig, UnknownTracker
 from attrib.metrics import der, false_accept_rate, identification_error, word_speaker_error
-from attrib.transcribe import build_definition, parse_response
+from attrib.transcribe import parse_response, split_points
 from attrib.types import UNKNOWN, Region, Turn, Word
 from attrib.vad import EnergyGate, merge_regions, pack, split_conversations
 
@@ -133,17 +133,14 @@ def test_unknown_tracker_recurring():
     assert tr.recurring(3) == [0]
 
 
-def test_mai_definition_and_parse():
-    d = build_definition(["Sarah", "Marcus"])
-    assert d["enhancedMode"]["model"] == "MAI-Transcribe-2"
-    assert "diarization" not in d
-    assert d["phraseList"]["phrases"] == ["Sarah", "Marcus"]
-    body = {"phrases": [
-        {"offsetMilliseconds": 1000, "durationMilliseconds": 800, "text": "hello there",
-         "words": [{"text": "hello", "offsetMilliseconds": 1000, "durationMilliseconds": 400},
-                   {"text": "there", "offsetMilliseconds": 1400, "durationMilliseconds": 400}]},
-        {"offsetMilliseconds": 3000, "durationMilliseconds": 1000, "text": "no word times"},
-    ]}
-    ws = parse_response(body)
-    assert [(w.text, w.start) for w in ws][:2] == [("hello", 1.0), ("there", 1.4)]
-    assert ws[2].text == "no" and abs(ws[4].end - 4.0) < 1e-9
+def test_transcript_parse_and_split():
+    body = {"words": [{"word": "hello", "start": 1.0, "end": 1.4}, {"word": "there", "start": 1.4, "end": 1.8}]}
+    assert [(w.text, w.start) for w in parse_response(body, offset=10.0)] == [("hello", 11.0), ("there", 11.4)]
+    ws = parse_response({"segments": [{"start": 3.0, "end": 4.0, "text": "no word times"}]})
+    assert ws[0].text == "no" and abs(ws[2].end - 4.0) < 1e-9
+    x = np.ones(16000 * 50, np.float32)
+    x[16000 * 18: 16000 * 19] = 0  # a quiet second to cut at
+    cuts = split_points(x, max_s=20, search_s=5)
+    assert cuts[0] == 0 and cuts[-1] == len(x)
+    assert 16000 * 18 <= cuts[1] <= 16000 * 19
+    assert all(b - a <= 20 * 16000 for a, b in zip(cuts, cuts[1:]))

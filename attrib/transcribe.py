@@ -1,69 +1,83 @@
-"""MAI Transcribe 2 client (Azure Speech LLM Speech API, fast transcription).
+"""MAI Transcribe 2 client, through OpenRouter's OpenAI-compatible audio API.
 
-Speaker labels are turned off on purpose: native diarization fails on audio
-over ~15 minutes, and we diarize locally anyway. The response parser follows
-the fast-transcription schema and still needs checking against a live key.
+Speaker labels are not requested: we diarize locally. Long recordings are cut
+into pieces at quiet points so each upload stays small, and word times are
+shifted back onto the full recording.
 """
 from __future__ import annotations
 
-import json
+import io
 import os
 
+import numpy as np
+import soundfile as sf
+
+from .audio import SR
 from .types import Word
 
-API_VERSION = "2025-10-15"
+BASE_URL = "https://openrouter.ai/api/v1"
+MODEL = "microsoft/mai-transcribe-2"
 
 
-def build_definition(phrases: list[str] | None = None, locale: str | None = "en-US") -> dict:
-    d: dict = {
-        "enhancedMode": {
-            "enabled": True,
-            "model": "MAI-Transcribe-2",
-            "modelOptions": {"timestamps": "word", "transcribeStyle": "verbatim"},
-        },
-    }
-    if locale:
-        d["locales"] = [locale]
-    if phrases:
-        d["phraseList"] = {"phrases": phrases}
-    return d
-
-
-def parse_response(body: dict) -> list[Word]:
-    words: list[Word] = []
-    for ph in body.get("phrases", []):
-        ws = ph.get("words") or []
-        if not ws:
-            # No word timings: spread the phrase evenly as a fallback.
-            toks = ph.get("text", "").split()
-            t0 = ph["offsetMilliseconds"] / 1000
-            dur = ph["durationMilliseconds"] / 1000
-            for k, tok in enumerate(toks):
-                words.append(Word(tok, t0 + dur * k / len(toks), t0 + dur * (k + 1) / len(toks)))
-            continue
-        for w in ws:
-            s = w["offsetMilliseconds"] / 1000
-            words.append(Word(w["text"], s, s + w["durationMilliseconds"] / 1000))
+def parse_response(body: dict, offset: float = 0.0) -> list[Word]:
+    words = [Word(w["word"], offset + w["start"], offset + w["end"]) for w in body.get("words") or []]
+    if words:
+        return words
+    # No word timings: spread each segment's text evenly as a fallback.
+    for seg in body.get("segments") or []:
+        toks = seg.get("text", "").split()
+        t0, dur = offset + seg["start"], seg["end"] - seg["start"]
+        for k, tok in enumerate(toks):
+            words.append(Word(tok, t0 + dur * k / len(toks), t0 + dur * (k + 1) / len(toks)))
     return words
 
 
-class MAITranscriber:
-    def __init__(self, endpoint: str | None = None, key: str | None = None, timeout: float = 1800):
-        self.endpoint = (endpoint or os.environ["AZURE_SPEECH_ENDPOINT"]).rstrip("/")
-        self.key = key or os.environ["AZURE_SPEECH_KEY"]
+def split_points(x: np.ndarray, max_s: float = 600.0, search_s: float = 15.0, sr: int = SR) -> list[int]:
+    """Sample offsets that cut `x` into pieces of at most `max_s`, each cut at
+    the quietest 0.2 s within the last `search_s` of its piece."""
+    cuts, start, hop = [0], 0, int(0.2 * sr)
+    while len(x) - start > max_s * sr:
+        hi = start + int(max_s * sr)
+        lo = hi - int(search_s * sr)
+        energy = [float(np.mean(x[i: i + hop] ** 2)) for i in range(lo, hi - hop, hop)]
+        start = lo + int(np.argmin(energy)) * hop + hop // 2
+        cuts.append(start)
+    return cuts + [len(x)]
+
+
+class OpenRouterTranscriber:
+    def __init__(self, key: str | None = None, model: str = MODEL, base_url: str = BASE_URL,
+                 timeout: float = 600, max_piece_s: float = 600.0):
+        self.key = key or os.environ["OPENROUTER_API_KEY"]
+        self.model = model
+        self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.max_piece_s = max_piece_s
+        self.seconds_billed = 0.0
 
     def __call__(self, wav_bytes: bytes, phrases: list[str] | None = None) -> list[Word]:
+        x, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32")
+        cuts = split_points(x, self.max_piece_s, sr=sr)
+        words: list[Word] = []
+        for a, b in zip(cuts, cuts[1:]):
+            words += self._piece(x[a:b], sr, a / sr, phrases)
+        return words
+
+    def _piece(self, x: np.ndarray, sr: int, offset: float, phrases: list[str] | None) -> list[Word]:
         import requests
 
-        r = requests.post(
-            f"{self.endpoint}/speechtotext/transcriptions:transcribe?api-version={API_VERSION}",
-            headers={"Ocp-Apim-Subscription-Key": self.key},
-            files={
-                "audio": ("audio.wav", wav_bytes, "audio/wav"),
-                "definition": (None, json.dumps(build_definition(phrases)), "application/json"),
-            },
-            timeout=(30, self.timeout),
-        )
+        buf = io.BytesIO()
+        sf.write(buf, x, sr, format="FLAC", subtype="PCM_16")
+        data = [("model", self.model), ("response_format", "verbose_json"),
+                ("timestamp_granularities[]", "word")]
+        if phrases:
+            # Names of enrolled people, so they are spelled right.
+            data.append(("prompt", ", ".join(phrases)))
+        r = requests.post(f"{self.base_url}/audio/transcriptions",
+                          headers={"Authorization": f"Bearer {self.key}"},
+                          data=data, files={"file": ("audio.flac", buf.getvalue(), "audio/flac")},
+                          timeout=(30, self.timeout))
         r.raise_for_status()
-        return parse_response(r.json())
+        body = r.json()
+        self.seconds_billed += float((body.get("usage") or {}).get("seconds") or len(x) / sr)
+        return parse_response(body, offset)
