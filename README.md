@@ -56,6 +56,7 @@ scripts/install_mac.sh              # venv, models, .env with a random webhook t
 # add OPENROUTER_API_KEY to .env
 .venv/bin/python -m omibridge       # webhook on :8377, review page on http://127.0.0.1:8378/
 scripts/install_mac.sh --launchd    # optional: keep it running with launchd
+.venv/bin/python -m omibridge.replay data/sample.wav --speed 15   # test without a pendant
 ```
 
 Two ports on purpose. Port 8377 serves only `POST /omi/audio/<token>` and is the
