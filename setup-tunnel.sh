@@ -37,13 +37,19 @@ YML
 $CF tunnel --config "$HERE/cloudflared.yml" ingress validate
 
 # The URL to paste into the Omi app (contains the secret token): owner-only file, git-ignored.
+# The token is read with the bridge's own .env parser, so the address always matches what the server checks.
 ( umask 077; $PY -I -c '
 import sys
-tok = [l.split("=", 1)[1].strip() for l in open(sys.argv[1]) if l.startswith("OMIBRIDGE_TOKEN=")][0]
-print(f"https://{sys.argv[2]}/omi/audio/{tok}")' "$HERE/.env" $HOST > "$HERE/WEBHOOK_URL.txt" )
+sys.path.insert(0, sys.argv[1])
+from pathlib import Path
+from omibridge.config import parse_env_file
+tok = parse_env_file(Path(sys.argv[1]) / ".env").get("OMIBRIDGE_TOKEN", "")
+if not tok:
+    sys.exit("OMIBRIDGE_TOKEN is empty in .env; run scripts/install_mac.sh again.")
+print(f"https://{sys.argv[2]}/omi/audio/{tok}")' "$HERE" $HOST > "$HERE/WEBHOOK_URL.txt" )
 chmod 600 "$HERE/WEBHOOK_URL.txt"
 
-mkdir -p "$HERE/logs"
+mkdir -p "$HERE/logs" ~/Library/LaunchAgents
 for a in local.omi-bridge.server local.omi-bridge.tunnel; do
   sed "s|__ROOT__|$HERE|g" "$HERE/scripts/$a.plist" > ~/Library/LaunchAgents/$a.plist
 done

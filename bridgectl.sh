@@ -9,7 +9,7 @@ HOST=omi.gabrielprice.com
 
 case "${1:-status}" in
   start)
-    mkdir -p "$HERE/logs"
+    mkdir -p "$HERE/logs" ~/Library/LaunchAgents
     for a in $AGENTS; do
       [[ -f ~/Library/LaunchAgents/$a.plist ]] || sed "s|__ROOT__|$HERE|g" "$HERE/scripts/$a.plist" > ~/Library/LaunchAgents/$a.plist
       launchctl bootstrap $D ~/Library/LaunchAgents/$a.plist 2>/dev/null || launchctl kickstart $D/$a

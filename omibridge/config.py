@@ -6,10 +6,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-def load_env_file(path: Path) -> None:
-    """KEY=VALUE lines; values already in the environment win."""
+def parse_env_file(path: Path) -> dict[str, str]:
+    """KEY=VALUE lines of a .env file. Quotes and trailing comments are removed."""
+    out: dict[str, str] = {}
     if not path.exists():
-        return
+        return out
     for line in path.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -21,7 +22,14 @@ def load_env_file(path: Path) -> None:
         else:
             # "KEY=   # comment" is empty; "KEY=value  # comment" is "value".
             v = "" if v.startswith("#") else v.split(" #", 1)[0].split("\t#", 1)[0].rstrip()
-        os.environ.setdefault(k.strip(), v)
+        out[k.strip()] = v
+    return out
+
+
+def load_env_file(path: Path) -> None:
+    """Values already in the environment win."""
+    for k, v in parse_env_file(path).items():
+        os.environ.setdefault(k, v)
 
 
 def _f(name: str, default: float) -> float:
