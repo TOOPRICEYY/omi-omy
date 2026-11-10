@@ -56,6 +56,9 @@ scripts/install_mac.sh              # venv, models, .env with a random webhook t
 # add OPENROUTER_API_KEY to .env
 .venv/bin/python -m omibridge       # webhook on :8377, review page on http://127.0.0.1:8378/
 scripts/install_mac.sh --launchd    # optional: keep it running with launchd
+zsh setup-tunnel.sh                  # this Mac mini: tunnel omi.gabrielprice.com -> :8377 plus local.omi-bridge.* login agents
+zsh scripts/set_keys.sh             # enter OPENROUTER_API_KEY without it showing anywhere
+zsh bridgectl.sh status             # status | start | stop | restart | logs
 .venv/bin/python -m omibridge.replay data/sample.wav --speed 15   # test without a pendant
 ```
 

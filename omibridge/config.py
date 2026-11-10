@@ -15,7 +15,13 @@ def load_env_file(path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+        v = v.strip()
+        if v[:1] in ("'", '"') and v[:1] in v[1:]:
+            v = v[1:v.index(v[0], 1)]
+        else:
+            # "KEY=   # comment" is empty; "KEY=value  # comment" is "value".
+            v = "" if v.startswith("#") else v.split(" #", 1)[0].split("\t#", 1)[0].rstrip()
+        os.environ.setdefault(k.strip(), v)
 
 
 def _f(name: str, default: float) -> float:

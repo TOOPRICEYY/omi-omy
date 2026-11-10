@@ -7,6 +7,20 @@ from pathlib import Path
 from .config import Config, load_env_file
 
 
+class _RedactToken(logging.Filter):
+    """Keeps the webhook token (part of the URL path) out of uvicorn's access log."""
+
+    def __init__(self, token: str) -> None:
+        super().__init__()
+        self.token = token
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self.token and isinstance(record.args, tuple):
+            record.args = tuple(a.replace(self.token, "<token>") if isinstance(a, str) else a
+                                for a in record.args)
+        return True
+
+
 def main() -> None:
     load_env_file(Path(".env"))
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -32,6 +46,7 @@ def main() -> None:
 
     import threading
 
+    logging.getLogger("uvicorn.access").addFilter(_RedactToken(cfg.token))
     app = create_app(cfg)
     # Public port: the Omi webhook only (this is the one to put behind a tunnel).
     threading.Thread(target=uvicorn.run, args=(app.state.public,), daemon=True,
