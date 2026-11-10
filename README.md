@@ -68,8 +68,21 @@ Data stays in `data/bridge/`: `conversations/<id>/` holds `audio.flac`,
 `conversation.json` (speakers and transcript lines) and the voiceprints needed
 to rename speakers later; `gallery.npz` holds the enrolled people.
 
-Not verified yet: writing conversations back into Omi (`omibridge/omi_api.py`).
-It is off unless `OMI_API_KEY` is set. DiariZen's weights are CC-BY-NC-4.0, so
+Facts about Omi's side, from its source (commit 760499bd):
+
+- Omi's backend sends the audio, not the phone, so the webhook URL must be
+  public. Private and Tailscale addresses are rejected.
+- It sends every second of a live session, silence included, as raw 16 kHz
+  PCM16 with `uid` and `sample_rate` in the query and an `Idempotency-Key`
+  header. Failed POSTs are retried, and after 100 failures in a row Omi turns
+  the webhook off, so the endpoint answers before doing any heavy work.
+- Audio synced later from the pendant's storage is not sent.
+
+Posting conversations into Omi (`omibridge/omi_api.py`) is off by default. Omi
+already keeps its own copy of each live conversation, so a posted one is a
+second copy with a second round of summaries and memories. Turn it on with
+`OMIBRIDGE_OMI_WRITEBACK=1` and an `OMI_API_KEY` that has `conversations:write`.
+The request follows Omi's source but has not been tried against the live API. DiariZen's weights are CC-BY-NC-4.0, so
 this setup is for personal use.
 
 ## Results so far (simulated audio, 2026-10-29)

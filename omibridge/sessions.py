@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
@@ -21,7 +22,8 @@ from attrib.audio import SR, resample
 from .config import Config
 
 
-TAIL = 2  # seconds kept after the last speech
+TAIL = 2     # seconds kept after the last speech
+PREROLL = 3  # seconds kept from before the first speech
 
 
 @dataclass
@@ -48,14 +50,24 @@ class SessionManager:
         self.clock = clock
         self.lock = threading.Lock()
         self.sessions: dict[str, Session] = {}
+        self.preroll: dict[str, bytes] = {}     # last few seconds heard while idle
+        self.seen: OrderedDict[str, None] = OrderedDict()  # recent Idempotency-Keys
         cfg.ensure_dirs()
 
     def _path(self, uid: str) -> Path:
         safe = "".join(c for c in uid if c.isalnum() or c in "-_") or "user"
         return self.cfg.live_dir / f"{safe}.pcm"
 
-    def ingest(self, uid: str, sample_rate: int, body: bytes) -> dict:
+    def ingest(self, uid: str, sample_rate: int, body: bytes, key: str | None = None) -> dict:
+        """`key` is Omi's Idempotency-Key: a retried POST must not add the audio twice."""
         now = self.clock()
+        if key:
+            with self.lock:
+                if key in self.seen:
+                    return {"state": "duplicate"}
+                self.seen[key] = None
+                while len(self.seen) > 5000:
+                    self.seen.popitem(last=False)
         x = pcm_to_float(body)
         spoken = self.speech_seconds(resample(x, sample_rate)) if len(x) else 0.0
         with self.lock:
@@ -65,11 +77,14 @@ class SessionManager:
                 s = None
             if s is None:
                 if spoken <= 0:
+                    # Omi sends one-second pieces, so keep a little to not clip the first word.
+                    self.preroll[uid] = (self.preroll.get(uid, b"") + body)[-PREROLL * sample_rate * 2:]
                     return {"state": "idle"}
-                # Start the file at this chunk; earlier silence was never stored.
-                s = Session(uid, sample_rate, now - len(body) / 2 / sample_rate)
+                pre = self.preroll.pop(uid, b"")
+                s = Session(uid, sample_rate, now - (len(pre) + len(body)) / 2 / sample_rate,
+                            samples=len(pre) // 2)
                 self.sessions[uid] = s
-                self._path(uid).write_bytes(b"")
+                self._path(uid).write_bytes(pre)
             with open(self._path(uid), "ab") as f:
                 f.write(body)
             s.samples += len(body) // 2

@@ -3,7 +3,7 @@ import numpy as np
 from attrib.types import Turn, Word
 from omibridge.config import Config
 from omibridge.engine import segments
-from omibridge.omi_api import build_payload
+from omibridge.omi_api import build_payload, fit
 from omibridge.sessions import SessionManager, pcm_to_float
 
 SR = 16000
@@ -29,7 +29,7 @@ def test_pcm_roundtrip():
 def test_session_cut_on_silence(tmp_path):
     cfg, now, m = _manager(tmp_path)
     assert m.ingest("u", SR, _pcm(5, 0.0))["state"] == "idle"       # silence before speech is not stored
-    assert not list(cfg.live_dir.glob("*.pcm"))
+    assert not list(cfg.live_dir.glob("*.pcm"))                      # only a short pre-roll in memory
     for _ in range(4):
         now[0] += 5
         assert m.ingest("u", SR, _pcm(5, 0.5))["state"] == "recording"
@@ -39,7 +39,7 @@ def test_session_cut_on_silence(tmp_path):
     assert m.sweep() == []
     now[0] += 10
     (cid,) = m.sweep()
-    assert (cfg.queue_dir / f"{cid}.pcm").stat().st_size == 2 * SR * 22  # 20 s of speech + 2 s tail
+    assert (cfg.queue_dir / f"{cid}.pcm").stat().st_size == 2 * SR * 25  # 3 s from before, 20 s of speech, 2 s tail
     assert not m.sessions and m.sweep() == []
 
 
@@ -67,7 +67,28 @@ def test_segments_and_omi_payload():
     segs = segments(words, turns)
     assert [(s["speaker"], s["text"]) for s in segs] == [("Ana", "hi there"), ("unknown1", "hey"), ("unknown1", "again")]
     assert segments([], turns)[1] == {"speaker": "unknown1", "start": 2, "end": 4, "text": ""}
-    p = build_payload({"segments": segs, "started_at": 0, "duration": 10}, wearer="Ana")
+    p = build_payload({"id": "c1", "segments": segs, "started_at": 0, "duration": 10}, wearer="Ana")
     a, b = p["transcript_segments"][:2]
     assert a["is_user"] and a["text"] == "hi there" and a["speaker"] == "SPEAKER_00"
     assert not b["is_user"] and b["speaker"] == "SPEAKER_01"
+    assert p["client_session_id"] == "omi-omy-c1" and p["started_at"].endswith("+00:00")
+    named = [{"speaker": "Bo", "start": 0, "end": 1, "text": "yo"}, {"speaker": "Cy", "start": 1, "end": 2, "text": "hm"}]
+    q = build_payload({"id": "c2", "segments": named, "started_at": 0}, people={"bo": "p-1"})["transcript_segments"]
+    assert q[0]["person_id"] == "p-1" and q[0]["text"] == "yo"      # an Omi person: linked by id
+    assert "person_id" not in q[1] and q[1]["text"] == "Cy: hm"     # not in Omi: name goes in the text
+
+
+def test_omi_segment_limit():
+    segs = [{"speaker": "A" if (i // 3) % 2 else "B", "start": i, "end": i + 1, "text": str(i)} for i in range(1200)]
+    out = fit(segs, 500)
+    assert len(out) <= 500 and out[0]["text"].startswith("0 1")
+    assert sum(len(s["text"].split()) for s in out) == 1200
+
+
+def test_retry_and_preroll(tmp_path):
+    cfg, now, m = _manager(tmp_path)
+    m.ingest("u", SR, _pcm(1, 0.0), key="a")
+    m.ingest("u", SR, _pcm(1, 0.0), key="b")
+    assert m.ingest("u", SR, _pcm(1, 0.5), key="c")["state"] == "recording"
+    assert m.ingest("u", SR, _pcm(1, 0.5), key="c")["state"] == "duplicate"   # Omi retried the same POST
+    assert (cfg.live_dir / "u.pcm").stat().st_size == 2 * SR * 3             # 2 s kept from before + 1 s

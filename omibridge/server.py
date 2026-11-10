@@ -19,6 +19,7 @@ from pathlib import Path
 
 import soundfile as sf
 from fastapi import Body, FastAPI, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from attrib.audio import SR
@@ -58,7 +59,7 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
         status["processing"] = cid
         try:
             doc = engine.process(pcm, json.loads(meta_p.read_text()))
-            if cfg.omi_api_key and any(s["text"] for s in doc["segments"]):
+            if cfg.omi_writeback and cfg.omi_api_key and any(s["text"] for s in doc["segments"]):
                 from . import omi_api
 
                 try:
@@ -109,7 +110,14 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
         if not 8000 <= sample_rate <= 48000:
             raise HTTPException(400, "bad sample_rate")
         body = await request.body()
-        res = sessions.ingest(uid, sample_rate, body)
+        # Omi turns the webhook off after 100 failed deliveries in a row, so this
+        # must answer fast and never fail because of our own processing.
+        try:
+            res = await run_in_threadpool(sessions.ingest, uid, sample_rate, body,
+                                          request.headers.get("idempotency-key"))
+        except Exception:
+            log.exception("ingest failed")
+            return {"state": "error"}
         if res.get("id"):
             jobs.put(res["id"])
         return res
@@ -124,7 +132,7 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
     def health():
         return {"ok": True, "recording": [s.uid for s in sessions.sessions.values()],
                 "queued": jobs.qsize(), **status, "people": len(engine.gallery.people),
-                "transcription": engine.transcriber is not None, "omi_writeback": bool(cfg.omi_api_key)}
+                "transcription": engine.transcriber is not None, "omi_writeback": bool(cfg.omi_writeback and cfg.omi_api_key)}
 
     @app.get("/", response_class=HTMLResponse)
     def index():

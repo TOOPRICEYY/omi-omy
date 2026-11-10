@@ -45,7 +45,10 @@ class Config:
     identify_threshold: float = field(default_factory=lambda: _f("OMIBRIDGE_IDENTIFY_THRESHOLD", 2.5))
     transcribe: bool = field(default_factory=lambda: os.environ.get("OMIBRIDGE_TRANSCRIBE", "1") != "0")
 
-    # Omi developer API write-back (off unless a key is set).
+    # Posting finished conversations into Omi (developer key with conversations:write).
+    # Off by default: Omi also keeps its own copy of every live conversation, so
+    # this creates a second one and runs Omi's summaries and memories on it again.
+    omi_writeback: bool = field(default_factory=lambda: os.environ.get("OMIBRIDGE_OMI_WRITEBACK", "0") == "1")
     omi_api_key: str = field(default_factory=lambda: os.environ.get("OMI_API_KEY", ""))
     omi_api_base: str = field(default_factory=lambda: os.environ.get("OMI_API_BASE", "https://api.omi.me"))
 

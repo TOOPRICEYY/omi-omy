@@ -35,6 +35,9 @@ class Engine:
         self.cfg = cfg
         self.lock = threading.Lock()
         self.vad = SileroVAD()
+        # The live stream gets its own detector and lock, so the webhook never
+        # waits behind a conversation that is being processed.
+        self.live_vad, self.live_lock = SileroVAD(), threading.Lock()
         self.embedder = Embedder(str(cfg.models_dir / EMBEDDING))
         self.diarizer = ChunkDiarizer(str(cfg.models_dir / SEGMENTATION[cfg.segmentation]), self.embedder,
                                       threshold=cfg.cluster_threshold,
@@ -47,8 +50,8 @@ class Engine:
     def speech_seconds(self, x: np.ndarray) -> float:
         if len(x) < SR // 4:
             return 0.0
-        with self.lock:
-            return sum(r.duration for r in self.vad(x))
+        with self.live_lock:
+            return sum(r.duration for r in self.live_vad(x))
 
     # -- naming ----------------------------------------------------------------
     def _identifier(self) -> Identifier:
