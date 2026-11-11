@@ -29,6 +29,7 @@
   button.g { background:transparent; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 10px; font:inherit; cursor:pointer; }
   .seg { padding:5px 0; } .seg b { margin-right:6px; } .seg .t { color:var(--mut); font-size:12px; margin-right:6px; font-variant-numeric: tabular-nums; }
   .err { color:#c0392b; }
+  ul { margin:4px 0 0; padding-left:20px; }
 </style>
 </head>
 <body>
@@ -77,7 +78,7 @@ async function refresh() {
   if (h.last_error) $("#status").innerHTML += `<div class="err">${esc(h.last_error)}</div>`;
   const convs = await api("/api/conversations");
   $("#list").innerHTML = convs.map((c) => `<button class="item ${c.id === current ? "sel" : ""}" data-id="${esc(c.id)}">
-      ${esc(when(c.started_at))} · ${fmt(c.duration)}
+      ${c.title ? `<b>${esc((c.emoji ? c.emoji + " " : "") + c.title)}</b><br>` : ""}${esc(when(c.started_at))} · ${fmt(c.duration)}
       <small>${esc(c.speakers.map((s) => s.name).join(", "))}</small><small>${esc(c.preview)}</small></button>`).join("")
     || `<div class="mut">Nothing yet.</div>`;
   const people = await api("/api/people");
@@ -88,8 +89,10 @@ async function refresh() {
 }
 function show(d) {
   current = d.id;
-  $("#detail").innerHTML = `<h1>${esc(when(d.started_at))}</h1>
-    <div class="status">${fmt(d.duration)} long, ${fmt(d.speech_seconds)} of speech${d.error ? ` · <span class="err">${esc(d.error)}</span>` : ""}</div>
+  const sm = d.summary;
+  $("#detail").innerHTML = `<h1>${esc(sm ? (sm.emoji ? sm.emoji + " " : "") + sm.title : when(d.started_at))}</h1>
+    <div class="status">${sm ? esc(when(d.started_at)) + " · " : ""}${fmt(d.duration)} long, ${fmt(d.speech_seconds)} of speech${d.error ? ` · <span class="err">${esc(d.error)}</span>` : ""}</div>
+    ${sm ? `<div class="card"><div>${esc(sm.overview)}</div>${sm.action_items.length ? `<h2>Action items</h2><ul>${sm.action_items.map((a) => `<li>${esc(a)}</li>`).join("")}</ul>` : ""}</div>` : ""}
     <div class="card">${d.speakers.map((s, i) => `<div class="row">
         <span class="name ${s.known ? "" : "unk"}">${esc(s.name)}</span>
         <span class="mut">${fmt(s.speech_seconds)}${s.known ? ` · ${Math.round(s.confidence * 100)}%` : ""}</span>

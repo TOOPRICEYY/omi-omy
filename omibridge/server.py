@@ -38,7 +38,7 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
     cfg = cfg or Config()
     cfg.ensure_dirs()
     if engine is None:
-        transcriber = None
+        transcriber = summarizer = None
         if cfg.transcribe:
             import os
 
@@ -46,20 +46,34 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
                 from attrib.transcribe import OpenRouterTranscriber
 
                 transcriber = OpenRouterTranscriber()
+                if cfg.summarize:
+                    from .summarize import Summarizer
+
+                    summarizer = Summarizer()
             else:
                 log.warning("OPENROUTER_API_KEY is not set: conversations will have speakers but no text")
-        engine = Engine(cfg, transcriber)
+        engine = Engine(cfg, transcriber, summarizer)
     sessions = SessionManager(cfg, engine.speech_seconds, clock)
     jobs: queue.Queue[str] = queue.Queue()
     status = {"processing": None, "last_error": None, "processed": 0}
     app = FastAPI(title="omi-omy bridge")
     app.state.cfg, app.state.engine, app.state.sessions, app.state.jobs = cfg, engine, sessions, jobs
 
+    def summarize(cid: str) -> dict | None:
+        """Never raises: a conversation without a summary is still a conversation."""
+        try:
+            return engine.summarize(cid)
+        except Exception as e:
+            status["last_error"] = f"{cid}: summary failed: {e}"
+            log.exception("summary failed for %s", cid)
+            return None
+
     def process_one(cid: str) -> None:
         pcm, meta_p = cfg.queue_dir / f"{cid}.pcm", cfg.queue_dir / f"{cid}.json"
         status["processing"] = cid
         try:
             doc = engine.process(pcm, json.loads(meta_p.read_text()))
+            doc = summarize(cid) or doc
             if cfg.omi_writeback and cfg.omi_api_key and any(s["text"] for s in doc["segments"]):
                 from . import omi_api
 
@@ -133,7 +147,7 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
     def health():
         return {"ok": True, "recording": [s.uid for s in sessions.sessions.values()],
                 "queued": jobs.qsize(), **status, "people": len(engine.gallery.people),
-                "transcription": engine.transcriber is not None, "omi_writeback": bool(cfg.omi_writeback and cfg.omi_api_key)}
+                "transcription": engine.transcriber is not None, "summaries": engine.summarizer is not None, "omi_writeback": bool(cfg.omi_writeback and cfg.omi_api_key)}
 
     @app.get("/", response_class=HTMLResponse)
     def index():
@@ -144,8 +158,10 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
         out = []
         for p in sorted(cfg.conv_dir.glob("*/conversation.json"), reverse=True)[:200]:
             d = json.loads(p.read_text())
+            summary = d.get("summary") or {}
             out.append({k: d[k] for k in ("id", "started_at", "duration", "speech_seconds", "speakers", "error")}
-                       | {"preview": " ".join(s["text"] for s in d["segments"][:3])[:160]})
+                       | {"title": summary.get("title"), "emoji": summary.get("emoji"),
+                          "preview": (summary.get("overview") or " ".join(s["text"] for s in d["segments"][:3]))[:160]})
         return out
 
     @app.post("/api/import")
@@ -188,9 +204,23 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
     def label(cid: str, speaker: str = Body(...), person: str = Body(...), learn: bool = Body(True)):
         conv_path(cid)
         try:
-            return engine.label(cid, speaker, person, learn)
+            doc = engine.label(cid, speaker, person, learn)
         except (KeyError, ValueError) as e:
             raise HTTPException(400, str(e))
+        if doc.get("summary"):
+            # The summary may mention the speaker by the old name; redo it in the background.
+            threading.Thread(target=summarize, args=(cid,), daemon=True).start()
+        return doc
+
+    @app.post("/api/conversations/{cid}/summarize")
+    def resummarize(cid: str):
+        conv_path(cid)
+        if engine.summarizer is None:
+            raise HTTPException(400, "summaries are off (no OPENROUTER_API_KEY, or OMIBRIDGE_SUMMARIZE=0)")
+        doc = summarize(cid)
+        if doc is None:
+            raise HTTPException(502, status["last_error"] or "summary failed")
+        return doc
 
     @app.post("/api/conversations/{cid}/rerun")
     def rerun(cid: str):

@@ -120,3 +120,20 @@ def test_import_recording_is_queued_and_split(tmp_path):
     with pytest.raises(ValueError):
         queue_recording(cfg, x[: 3 * sr], sr)
     assert parse_when("") is None and parse_when("1700000000") == 1700000000.0
+
+
+def test_summary_text_and_cleaning():
+    from omibridge.summarize import clean, transcript_text
+
+    doc = {"segments": [{"speaker": "Ana", "start": 65.2, "end": 70, "text": "hello there"},
+                        {"speaker": "unknown1", "start": 71, "end": 72, "text": ""},
+                        {"speaker": "unknown1", "start": 3725, "end": 3730, "text": "bye"}]}
+    assert transcript_text(doc) == "[1:05] Ana: hello there\n[62:05] unknown1: bye"
+    assert transcript_text({"segments": [{"speaker": "a", "start": 0, "text": ""}]}) == ""
+    long = {"segments": [{"speaker": "a", "start": i, "text": "word " * 20} for i in range(200)]}
+    cut = transcript_text(long, max_chars=2000)
+    assert len(cut) < 2100 and "middle left out" in cut
+    out = clean({"title": " Budget review. ", "overview": " ok ", "emoji": "📊", "category": "Sorcery",
+                 "action_items": ["send the sheet", " ", None]})
+    assert out == {"title": "Budget review", "overview": "ok", "emoji": "📊", "category": "other",
+                   "action_items": ["send the sheet"]}

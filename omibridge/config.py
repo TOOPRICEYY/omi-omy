@@ -58,6 +58,8 @@ class Config:
     cluster_threshold: float = field(default_factory=lambda: _f("OMIBRIDGE_CLUSTER_THRESHOLD", 0.5))
     identify_threshold: float = field(default_factory=lambda: _f("OMIBRIDGE_IDENTIFY_THRESHOLD", 2.5))
     transcribe: bool = field(default_factory=lambda: os.environ.get("OMIBRIDGE_TRANSCRIBE", "1") != "0")
+    # Title, overview and action items for each conversation (same OpenRouter key).
+    summarize: bool = field(default_factory=lambda: os.environ.get("OMIBRIDGE_SUMMARIZE", "1") != "0")
 
     # Posting finished conversations into Omi (developer key with conversations:write).
     # Off by default: Omi also keeps its own copy of every live conversation, so

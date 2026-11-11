@@ -6,6 +6,7 @@ import io
 import json
 import pickle
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -31,7 +32,7 @@ MAX_SAMPLES_PER_LABEL = 6  # voiceprints added to a person from one conversation
 
 
 class Engine:
-    def __init__(self, cfg: Config, transcriber=None):
+    def __init__(self, cfg: Config, transcriber=None, summarizer=None):
         self.cfg = cfg
         self.lock = threading.Lock()
         self.vad = SileroVAD()
@@ -45,6 +46,7 @@ class Engine:
         self.cohort = np.load(COHORT)
         self.gallery = Gallery.load(str(cfg.gallery_path)) if cfg.gallery_path.exists() else Gallery()
         self.transcriber = transcriber
+        self.summarizer = summarizer
 
     # -- voice detection for the live stream ---------------------------------
     def speech_seconds(self, x: np.ndarray) -> float:
@@ -128,9 +130,25 @@ class Engine:
         doc = {"id": cid, "started_at": meta.get("started_at"), "duration": round(meta.get("duration", 0), 1),
                "speech_seconds": round(meta.get("speech_seconds", 0), 1), "error": meta.get("error"),
                "speakers": sorted(speakers.values(), key=lambda s: -s["speech_seconds"]),
-               "segments": segments(words, turns)}
+               "summary": None, "segments": segments(words, turns)}
+        if (out / "summary.json").exists():
+            doc["summary"] = json.loads((out / "summary.json").read_text())
         (out / "conversation.json").write_text(json.dumps(doc, indent=1))
         return doc
+
+    def summarize(self, cid: str) -> dict:
+        """Write (or rewrite, after speakers were named) the summary of a conversation.
+        Leaves the old one in place when there is no summarizer or no text."""
+        doc = self.render(cid)
+        if self.summarizer is None:
+            return doc
+        when = doc.get("started_at")
+        text = time.strftime("%A %d %B %Y, %H:%M", time.localtime(when)) if when else None
+        summary = self.summarizer(doc | {"started_at_text": text})
+        if summary is None:
+            return doc
+        (self.cfg.conv_dir / cid / "summary.json").write_text(json.dumps(summary, ensure_ascii=False))
+        return self.render(cid)
 
     def label(self, cid: str, speaker: str, person: str, learn: bool = True) -> dict:
         """The user says `speaker` (a current name in this conversation, usually

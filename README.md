@@ -47,7 +47,8 @@ Runs next to the stock Omi app, no fork needed. The app's developer setting
 "Realtime audio bytes" posts the pendant's raw audio to the bridge. The bridge
 cuts it into conversations (closed after 2 minutes without speech), transcribes
 with MAI Transcribe 2 through OpenRouter, diarizes with DiariZen + TitaNet, and
-names the speakers it knows. A local review page lists conversations, plays a
+names the speakers it knows, and writes a short summary (title, overview, action
+items) with an LLM through the same OpenRouter key. A local review page lists conversations, plays a
 clip of each unknown voice, and lets you name it. Naming a voice adds it to the
 gallery, so later conversations recognize that person.
 
