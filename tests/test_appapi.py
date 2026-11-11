@@ -228,6 +228,43 @@ def test_listen_socket_to_conversation(env):
     assert api.coverage.covered(now[0] - 1, now[0]) > 0.9         # (frozen test clock: all audio lands at "now")
 
 
+def test_listen_socket_silence_gate(env):
+    """The phone's silence gate: a pause in the audio hands on the partial chunk, and the
+    silence the phone left out is put back, so the recording keeps its real length."""
+    cfg, now, bridge, api, client = env
+    api.idle_flush = 0.1
+    idt = sign_in(cfg, client, now)["idToken"]
+
+    def seconds(at_least):
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            s = api.sessions.sessions.get(api.key("owner"))
+            if s is not None and s.samples / SR >= at_least:
+                return s.samples / SR
+            time.sleep(0.02)
+        s = api.sessions.sessions.get(api.key("owner"))
+        raise AssertionError(f"have {s.samples / SR if s else None} s, want {at_least}")
+
+    with client.websocket_connect(f"{P}/v4/listen?codec=opus&sample_rate=16000", headers=auth(idt)) as ws:
+        assert json.loads(ws.receive_text())["type"] == "service_status"
+        ws.send_text(json.dumps({"type": "omiomy_silence_gap", "ms": 4000}))   # before any speech: nothing to fill
+        for p in opus_packets(tone(2.5)):
+            ws.send_bytes(p)
+        assert 2.4 <= seconds(2.4) <= 2.6           # the half-second remainder did not wait for more audio
+        for bad in ('{"type": "omiomy_silence_gap", "ms": "x"}', '{"type": "omiomy_silence_gap", "ms": -5}',
+                    '{"type": "omiomy_silence_gap", "ms": true}', 'omiomy_silence_gap', '["omiomy_silence_gap"]'):
+            ws.send_text(bad)                        # malformed notes are ignored
+        ws.send_text(json.dumps({"type": "omiomy_silence_gap", "ms": 3000}))
+        assert 5.4 <= seconds(5.4) <= 5.6           # three seconds of silence put back
+        ws.send_text(json.dumps({"type": "omiomy_silence_gap", "ms": 3_600_000}))
+        assert 15.4 <= seconds(15.4) <= 15.6        # never more than the idle timeout (10 s here)
+        for p in opus_packets(tone(1)):
+            ws.send_bytes(p)
+        assert 16.3 <= seconds(16.3) <= 16.6
+    s = api.sessions.sessions[api.key("owner")]
+    assert 3.3 <= s.speech_seconds <= 3.7           # the put-back silence is not speech
+
+
 # -- offline sync ------------------------------------------------------------------------
 def wal_file(packets: list[bytes]) -> bytes:
     return b"".join(struct.pack("<I", len(p)) + p for p in packets)

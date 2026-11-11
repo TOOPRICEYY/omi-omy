@@ -40,6 +40,24 @@ from .sessions import SessionManager
 log = logging.getLogger("omibridge.appapi")
 
 CHUNK_SAMPLES = SR            # feed the session manager about one second at a time
+IDLE_FLUSH = 1.0              # seconds without audio before a partial chunk is handed on
+# The phone's silence gate does not send quiet audio. Before it resumes it says how much
+# it left out, and the bridge puts that much silence back, so a conversation's audio and
+# timestamps come out the same with the gate on or off.
+GAP_TYPE = "omiomy_silence_gap"
+MAX_GAP_COVERED = 6 * 3600    # most that one gap note may mark as "heard by the phone"
+
+
+def gap_seconds(text: str) -> float:
+    """Seconds of silence announced by a {"type": "omiomy_silence_gap", "ms": N} note, else 0."""
+    try:
+        m = json.loads(text)
+    except ValueError:
+        return 0.0
+    ms = m.get("ms") if isinstance(m, dict) and m.get("type") == GAP_TYPE else None
+    if isinstance(ms, bool) or not isinstance(ms, (int, float)) or not 0 < ms < float("inf"):
+        return 0.0
+    return ms / 1000
 COVERAGE_DAYS = 14
 
 CUTOVER_CONTROL = {"state": "legacy", "client_action": "none", "offline_queue_instruction": "none",
@@ -143,6 +161,7 @@ class Coverage:
 class AppAPI:
     def __init__(self, cfg: Config, bridge: FastAPI, clock=time.time):
         self.cfg, self.clock = cfg, clock
+        self.idle_flush = IDLE_FLUSH
         self.sessions: SessionManager = bridge.state.sessions
         self.engine = bridge.state.engine
         self.enqueue = bridge.state.enqueue
@@ -433,6 +452,11 @@ class AppAPI:
             buf: list[np.ndarray] = []
             have = 0
 
+            async def feed(pcm: np.ndarray):
+                res = await run_in_threadpool(self.sessions.ingest, key, SR, pcm.astype("<i2").tobytes())
+                if res.get("id"):
+                    self.enqueue(res["id"])
+
             async def flush():
                 nonlocal buf, have
                 if not have:
@@ -441,13 +465,34 @@ class AppAPI:
                 buf, have = [], 0
                 end = self.clock()
                 self.coverage.add(end - len(pcm) / SR, end)
-                res = await run_in_threadpool(self.sessions.ingest, key, SR, pcm.astype("<i2").tobytes())
-                if res.get("id"):
-                    self.enqueue(res["id"])
+                await feed(pcm)
 
+            async def fill_gap(seconds: float):
+                # The phone was listening for this long and sent nothing because it was quiet.
+                await flush()
+                end = self.clock()
+                self.coverage.add(end - min(seconds, MAX_GAP_COVERED), end)
+                with self.sessions.lock:
+                    recording = key in self.sessions.sessions
+                # Silence between conversations is nothing. Inside one, put it back; a gap as
+                # long as the idle timeout has already ended the conversation.
+                if recording:
+                    await feed(np.zeros(int(min(seconds, self.cfg.idle_seconds) * SR), np.int16))
+
+            # One pending receive at a time, never cancelled while the socket lives: a timeout
+            # only means "no audio for a moment", and then a partial chunk is handed on so the
+            # end of a sentence is not held back until the next one starts.
+            pending: asyncio.Future | None = None
             try:
                 while True:
-                    msg = await ws.receive()
+                    if pending is None:
+                        pending = asyncio.ensure_future(ws.receive())
+                    if have:
+                        await asyncio.wait({pending}, timeout=self.idle_flush)
+                        if not pending.done():
+                            await flush()
+                            continue
+                    msg, pending = await pending, None
                     if msg["type"] == "websocket.disconnect":
                         break
                     if msg.get("bytes") is not None:
@@ -461,11 +506,17 @@ class AppAPI:
                         text = msg["text"]
                         if text == "ping":
                             await ws.send_text("pong")
-                        # JSON control messages (client_state, capture_evidence_frame,
+                        elif GAP_TYPE in text:
+                            gap = gap_seconds(text)
+                            if gap:
+                                await fill_gap(gap)
+                        # Other JSON control messages (client_state, capture_evidence_frame,
                         # suggested_transcript ...) are not needed here.
             except WebSocketDisconnect:
                 pass
             finally:
+                if pending is not None:
+                    pending.cancel()
                 await flush()
                 self.sockets.get(key, set()).discard(entry)
                 log.info("listen socket closed")
