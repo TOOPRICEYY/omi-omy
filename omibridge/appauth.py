@@ -8,10 +8,12 @@ calls itself, so no emulator, Node or Java is needed.
 
 The real credential is OMIBRIDGE_APP_SECRET, which the app carries inside its
 API address (https://<host>/app/<secret>/) and so only ever sends inside TLS.
-The emulator calls are plain http by the SDK's design and cannot carry it, so
-nothing in them is secret: a custom token (issued only under the secret path,
-valid 60 seconds, single use), an ID token and a refresh token only identify a
-session, and are worthless without the path secret. All three are HS256 JWTs
+The SDK's emulator calls cannot carry that path, so they sit at the root of the
+public port; the build patches the Firebase SDK (app-fork/pod_patches.py) so
+they use HTTPS when the emulator port is 443. Nothing in them is secret: a
+custom token (issued only under the secret path) is valid 60 seconds and works
+once, and ID and refresh tokens only identify a session and are worthless
+without the path secret. All three are HS256 JWTs
 keyed from the secret (the SDK only decodes the payload); every API request
 checks both the path secret and the ID token. There is one account
 (OMIBRIDGE_APP_UID). Rotating the secret signs out every device.
@@ -156,6 +158,14 @@ def emulator_router(tokens: Tokens) -> APIRouter:
     def session(auth_time: int) -> dict:
         return {"idToken": tokens.id_token(auth_time), "refreshToken": tokens.refresh_token(auth_time),
                 "expiresIn": str(ID_TOKEN_SECONDS), "localId": tokens.uid}
+
+    # The iOS SDK uses the v3 "relyingparty" names; the REST docs use the v1 names.
+    v3 = {"verifyCustomToken": "accounts:signInWithCustomToken", "getAccountInfo": "accounts:lookup",
+          "setAccountInfo": "accounts:update"}
+
+    @r.post("/www.googleapis.com/identitytoolkit/v3/relyingparty/{endpoint}")
+    async def relyingparty(endpoint: str, request: Request):
+        return await identitytoolkit(v3.get(endpoint, endpoint), request)
 
     @r.post("/identitytoolkit.googleapis.com/v1/{action}")
     async def identitytoolkit(action: str, request: Request):

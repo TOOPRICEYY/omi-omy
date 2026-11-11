@@ -320,3 +320,15 @@ def test_log_redaction():
                             None)
     _RedactToken("tok", SECRET).filter(rec)
     assert SECRET not in rec.getMessage() and "/app/<secret>/v1/x" in rec.getMessage()
+
+
+def test_ios_sdk_v3_endpoints(env):
+    """The Firebase iOS SDK (11.x) calls the v3 relyingparty names."""
+    cfg, now, _, api, client = env
+    custom = client.post(f"{P}/v1/auth/local-dev/custom-token").json()["custom_token"]
+    base = "/www.googleapis.com/identitytoolkit/v3/relyingparty"
+    r = client.post(f"{base}/verifyCustomToken?key=k", json={"token": custom, "returnSecureToken": True})
+    assert r.status_code == 200 and r.json()["idToken"]
+    r = client.post(f"{base}/getAccountInfo?key=k", json={"idToken": r.json()["idToken"]})
+    assert r.json()["users"][0]["localId"] == "owner"
+    assert client.post(f"{base}/signupNewUser?key=k", json={}).status_code == 400

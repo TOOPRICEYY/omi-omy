@@ -575,7 +575,8 @@ class PublicGate:
                         raise ValueError("request body too large")
                 return msg
 
-            emulator = inner_path.startswith(("/identitytoolkit.googleapis.com/", "/securetoken.googleapis.com/"))
+            emulator = inner_path.startswith(("/identitytoolkit.googleapis.com/", "/securetoken.googleapis.com/",
+                                              "/www.googleapis.com/"))
 
             async def watching_send(msg):
                 if msg["type"] == "http.response.start":

@@ -10,11 +10,15 @@
 #
 # The app reaches the bridge at <OMI_APP_BASE>/app/<OMIBRIDGE_APP_SECRET>/ (the secret
 # comes from .env and ends up inside the app; it is never printed). Firebase's sign-in
-# emulator calls go to the same host over plain http: port 80 for an https base,
-# otherwise the base's own port.
+# emulator calls go to the same host: over https on port 443 for an https base (the
+# Firebase SDK is patched for that by app-fork/pod_patches.py), otherwise plain http
+# on the base's own port (simulator tests on loopback).
 #
 # Env: OMI_APP_BASE (default https://omi.gabrielprice.com), OMI_SIM_DEVICE (simulator
 # name or id, default "iPhone 17"), OMI_ENV_FILE (default .env), OMI_FORK_DIR, FLUTTER_BIN.
+# OMI_FORK_AUTOPILOT=1 builds the test entry point in app-fork/tests/ instead, which taps through
+# the app by itself (OMIOMY_EXPECT_TITLE names a conversation the bridge holds);
+# OMI_FORK_SKIP_PREP=1 reuses the prepared tree.
 # Prints the built Runner.app path on the last line.
 set -eu -o pipefail
 HERE=${0:A:h:h}
@@ -37,10 +41,19 @@ from omibridge.config import parse_env_file; print(parse_env_file(Path(sys.argv[
 SCHEME=${BASE%%://*}
 HOSTPORT=${BASE#*://}; HOSTPORT=${HOSTPORT%%/*}
 HOST=${HOSTPORT%%:*}
-if [[ $HOSTPORT == *:* ]]; then PORT=${HOSTPORT##*:}; else PORT=80; fi
+if [[ $HOSTPORT == *:* ]]; then PORT=${HOSTPORT##*:}; elif [[ $SCHEME == https ]]; then PORT=443; else PORT=80; fi
 [[ $SCHEME == https ]] && PUBLIC_HOST=$HOST || PUBLIC_HOST=
 export OMI_BUILD_API="$BASE/app/$SECRET/"
 
+# Flutter hands the device straight to xcodebuild as an id, so resolve a simulator name to its UDID.
+if [[ ! $DEVICE =~ '^[0-9A-F-]{36}$' ]]; then
+  DEVICE=$(xcrun simctl list devices available -j | /usr/bin/python3 -c 'import json,sys
+name=sys.argv[1]; devs=[d for r in json.load(sys.stdin)["devices"].values() for d in r if d["name"]==name]
+devs.sort(key=lambda d: d["state"]!="Booted"); print(devs[0]["udid"] if devs else "")' "$DEVICE")
+  [[ -n $DEVICE ]] || { echo "No simulator named ${OMI_SIM_DEVICE:-iPhone 17}"; exit 1; }
+fi
+
+if [[ -z ${OMI_FORK_SKIP_PREP:-} ]]; then
 # 1. Upstream at the pinned commit. The tree belongs to this script: it is reset every run.
 if [[ ! -d $FORK/.git ]]; then
   git clone --filter=blob:none https://github.com/BasedHardware/omi.git "$FORK"
@@ -71,10 +84,21 @@ sed -i '' -E '/^[[:space:]]*(POSTHOG|INTERCOM)_/d' .dev.env
 # 3. Build.
 flutter pub get >/dev/null
 (cd ios && pod install >/dev/null 2>&1)
+# Firebase's emulator mode over https when the port is 443 (fails here if the SDK changed).
+/usr/bin/python3 "$HERE/app-fork/pod_patches.py" ios/Pods
 dart run build_runner build --delete-conflicting-outputs >/dev/null
+else
+  cd "$FORK/app"
+fi
 DEFINES=(--dart-define=OMI_API_BASE_URL="$OMI_BUILD_API"
          --dart-define=OMI_FIREBASE_AUTH_EMULATOR_HOST="$HOST"
          --dart-define=OMI_FIREBASE_AUTH_EMULATOR_PORT="$PORT")
 [[ -n $PUBLIC_HOST ]] && DEFINES+=(--dart-define=OMI_DEV_PUBLIC_API_HOST="$PUBLIC_HOST")
-flutter build ios --simulator --debug --flavor dev -d "$DEVICE" "${DEFINES[@]}" 2>&1 | grep -v -F "$SECRET"
+TARGET=()
+if [[ -n ${OMI_FORK_AUTOPILOT:-} ]]; then
+  # Test build: the autopilot entry point taps through the app by itself (see app-fork/tests/).
+  cp "$HERE"/app-fork/tests/omi_omy_autopilot.dart integration_test/
+  TARGET=(-t integration_test/omi_omy_autopilot.dart --dart-define=OMIOMY_EXPECT_TITLE="${OMIOMY_EXPECT_TITLE:-}")
+fi
+flutter build ios --simulator --debug --flavor dev -d "$DEVICE" "${DEFINES[@]}" "${TARGET[@]}" 2>&1 | grep -v -F "$SECRET"
 echo "$FORK/app/build/ios/iphonesimulator/Runner.app"
