@@ -68,6 +68,13 @@ it. Port 8378 has the review page and the transcripts, and listens on loopback
 only. In the Omi app set Settings > Developer Mode > Realtime audio bytes to
 `https://<your-host>/omi/audio/<OMIBRIDGE_TOKEN>`.
 
+Omi forwards live audio only. What the pendant stored while the phone was away
+is transcribed by Omi but never reaches the webhook. To bring such a recording
+in, turn on stored recordings in the Omi app, export the conversation's audio,
+and use "Import a recording" on the review page (`POST /api/import` on the
+private port). Recordings longer than `OMIBRIDGE_MAX_MINUTES` are cut at quiet
+points into several conversations.
+
 Data stays in `data/bridge/`: `conversations/<id>/` holds `audio.flac`,
 `conversation.json` (speakers and transcript lines) and the voiceprints needed
 to rename speakers later; `gallery.npz` holds the enrolled people.

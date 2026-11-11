@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 import soundfile as sf
-from fastapi import Body, FastAPI, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
@@ -26,6 +26,7 @@ from attrib.audio import SR
 
 from .config import Config
 from .engine import Engine
+from .importer import parse_when, queue_recording
 from .sessions import SessionManager
 
 log = logging.getLogger("omibridge")
@@ -146,6 +147,25 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
             out.append({k: d[k] for k in ("id", "started_at", "duration", "speech_seconds", "speakers", "error")}
                        | {"preview": " ".join(s["text"] for s in d["segments"][:3])[:160]})
         return out
+
+    @app.post("/api/import")
+    async def import_recording(file: UploadFile, started_at: str | None = Form(None)):
+        """A recording the webhook never saw (for example exported from the Omi app)."""
+        data = await file.read()
+
+        def work() -> list[str]:
+            x, sr = sf.read(io.BytesIO(data), dtype="float32")
+            return queue_recording(cfg, x, sr, parse_when(started_at), file.filename or "")
+
+        try:
+            ids = await run_in_threadpool(work)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except Exception:
+            raise HTTPException(400, "could not read that file as audio (WAV, FLAC, MP3 and OGG work)")
+        for cid in ids:
+            jobs.put(cid)
+        return {"queued": ids}
 
     @app.get("/api/conversations/{cid}")
     def conversation(cid: str):

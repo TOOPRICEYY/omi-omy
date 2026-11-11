@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from attrib.types import Turn, Word
 from omibridge.config import Config
@@ -92,3 +93,30 @@ def test_retry_and_preroll(tmp_path):
     assert m.ingest("u", SR, _pcm(1, 0.5), key="c")["state"] == "recording"
     assert m.ingest("u", SR, _pcm(1, 0.5), key="c")["state"] == "duplicate"   # Omi retried the same POST
     assert (cfg.live_dir / "u.pcm").stat().st_size == 2 * SR * 3             # 2 s kept from before + 1 s
+
+
+def test_import_recording_is_queued_and_split(tmp_path):
+    import json
+
+    from omibridge.importer import parse_when, queue_recording
+
+    cfg = Config(data_dir=tmp_path, max_minutes=1, min_speech_seconds=8)
+    sr = 8000
+    rng = np.random.default_rng(0)
+    x = (rng.standard_normal(150 * sr) * 0.1).astype(np.float32)   # 2.5 minutes, 8 kHz
+    x[55 * sr: 56 * sr] = 0.0                                      # a quiet second to cut at
+    stereo = np.stack([x, x], axis=1)
+    t0 = parse_when("2026-11-11T09:30:00+00:00")
+    ids = queue_recording(cfg, stereo, sr, t0, "walk.wav", now=t0 + 9999)
+    assert len(ids) == 3 and len(set(ids)) == 3 and all(i.endswith("-import") for i in ids)
+    metas = [json.loads((cfg.queue_dir / f"{i}.json").read_text()) for i in ids]
+    assert metas[0]["started_at"] == t0 and metas[0]["sample_rate"] == 16000 and metas[0]["source"] == "walk.wav"
+    assert 55 <= metas[1]["started_at"] - t0 <= 56                 # cut inside the quiet second
+    total = sum((cfg.queue_dir / f"{i}.pcm").stat().st_size for i in ids)
+    assert total == 150 * 16000 * 2                                # nothing dropped, resampled to 16 kHz
+    # The same recording again gets new ids instead of overwriting.
+    again = queue_recording(cfg, stereo, sr, t0, "walk.wav", now=t0 + 9999)
+    assert not set(again) & set(ids)
+    with pytest.raises(ValueError):
+        queue_recording(cfg, x[: 3 * sr], sr)
+    assert parse_when("") is None and parse_when("1700000000") == 1700000000.0
