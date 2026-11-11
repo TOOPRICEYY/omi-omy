@@ -5,13 +5,16 @@ status, the conversation list and detail, delete, "stop recording", the live
 listen socket and offline sync. Every other route answers 404, which the app
 treats as "nothing here" (empty memories, chat, apps, people lists ...).
 
-Runs on its own port (OMIBRIDGE_APP_PORT), shares the bridge's session manager,
-job queue and engine, so live audio from the app is cut, transcribed, named and
-summarized exactly like audio from the webhook.
+Served on the bridge's public port (the one the Cloudflare tunnel exposes) under
+/app/<OMIBRIDGE_APP_SECRET>/: without the secret every path is the same plain 404
+as any unknown address. Shares the bridge's session manager, job queue and
+engine, so live audio from the app is cut, transcribed, named and summarized
+exactly like audio from the webhook.
 """
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import re
@@ -30,7 +33,7 @@ from fastapi.responses import JSONResponse, Response
 from attrib.audio import SR
 
 from . import appaudio
-from .appauth import Tokens, router as auth_router
+from .appauth import Tokens, custom_token_router, emulator_router
 from .config import Config
 from .sessions import SessionManager
 
@@ -151,6 +154,11 @@ class AppAPI:
         self.lock = threading.Lock()
         bridge.state.listeners.append(self)
         self.app = self._build()
+        # The public port: the webhook, the sign-in emulator calls at the root, and this API
+        # under the secret path, behind size caps and a limiter on failed checks.
+        self.limiter = FailureLimiter(clock)
+        bridge.state.public.include_router(emulator_router(self.tokens))
+        self.public = PublicGate(bridge.state.public, self.app, cfg.app_secret, self.limiter)
 
     # A session key per app account, separate from webhook users.
     def key(self, uid: str) -> str:
@@ -255,7 +263,7 @@ class AppAPI:
     def _build(self) -> FastAPI:
         cfg, tokens = self.cfg, self.tokens
         app = FastAPI(title="omi-omy app API", docs_url=None, redoc_url=None, openapi_url=None)
-        app.include_router(auth_router(cfg, tokens))
+        app.include_router(custom_token_router(tokens))
 
         def user(authorization: str | None) -> str:
             try:
@@ -457,3 +465,130 @@ class AppAPI:
             raise HTTPException(404, "not available on this backend")
 
         return app
+
+
+# -- the public port's front door ----------------------------------------------------
+FAIL_WINDOW = 600      # seconds
+FAIL_LIMIT = 30        # failed checks per address in the window before it is blocked
+BLOCK_SECONDS = 900
+MAX_BODY = {"/v2/sync-local-files": 128 * 2**20, "/omi/audio/": 2**20}
+DEFAULT_MAX_BODY = 256 * 2**10
+
+
+class FailureLimiter:
+    """Counts failed secret/token checks per client address; too many blocks it for a while."""
+
+    def __init__(self, clock=time.time):
+        self.clock, self.lock = clock, threading.Lock()
+        self.fails: dict[str, list[float]] = {}
+        self.blocked_until: dict[str, float] = {}
+
+    def fail(self, ip: str) -> None:
+        now = self.clock()
+        with self.lock:
+            recent = [t for t in self.fails.get(ip, []) if t > now - FAIL_WINDOW] + [now]
+            self.fails[ip] = recent
+            if len(recent) >= FAIL_LIMIT:
+                self.blocked_until[ip] = now + BLOCK_SECONDS
+                self.fails.pop(ip, None)
+                log.warning("blocked an address for %d minutes after repeated failed checks", BLOCK_SECONDS // 60)
+            if len(self.fails) > 10000:          # bound memory under a flood of addresses
+                self.fails.clear()
+
+    def blocked(self, ip: str) -> bool:
+        until = self.blocked_until.get(ip)
+        if until is None:
+            return False
+        if until <= self.clock():
+            self.blocked_until.pop(ip, None)
+            return False
+        return True
+
+
+def client_ip(scope) -> str:
+    for k, v in scope.get("headers", []):
+        if k == b"cf-connecting-ip":
+            return v.decode("latin-1").strip()
+    c = scope.get("client")
+    return c[0] if c else "?"
+
+
+def body_cap(path: str) -> int:
+    for prefix, cap in MAX_BODY.items():
+        if path.startswith(prefix):
+            return cap
+    return DEFAULT_MAX_BODY
+
+
+class PublicGate:
+    """ASGI front for the public port.
+
+    /app/<secret>/<rest> goes to the app API as /<rest> (constant-time secret check).
+    Anything else, including /app/<wrong>/..., goes to the public app unchanged, so a
+    wrong secret gets exactly the 404 an unknown path gets. Failed checks (bad secret,
+    401/403 answers, refused sign-in tokens) count against the client's address.
+    """
+
+    def __init__(self, public, api, secret: str, limiter: FailureLimiter):
+        self.public, self.api, self.limiter = public, api, limiter
+        self.secret = secret.encode()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            return await self.public(scope, receive, send)
+        ip = client_ip(scope)
+        if self.limiter.blocked(ip):
+            if scope["type"] == "http":
+                await send({"type": "http.response.start", "status": 429,
+                            "headers": [(b"content-type", b"text/plain")]})
+                await send({"type": "http.response.body", "body": b"Too many failed attempts"})
+            else:
+                await send({"type": "websocket.close", "code": 1008})
+            return
+        path = scope["path"]
+        target = self.public
+        if path.startswith("/app/"):
+            seg, _, tail = path[5:].partition("/")
+            if hmac.compare_digest(seg.encode(), self.secret):
+                tail = "/" + tail
+                scope = dict(scope, path=tail, raw_path=tail.encode(), root_path="")
+                target = self.api
+            else:
+                self.limiter.fail(ip)
+        inner_path = scope["path"]
+
+        if scope["type"] == "http":
+            cap = body_cap(inner_path)
+            length = next((v for k, v in scope.get("headers", []) if k == b"content-length"), None)
+            if length is not None and length.isdigit() and int(length) > cap:
+                await send({"type": "http.response.start", "status": 413, "headers": []})
+                await send({"type": "http.response.body", "body": b""})
+                return
+            seen = 0
+
+            async def capped_receive():
+                nonlocal seen
+                msg = await receive()
+                if msg["type"] == "http.request":
+                    seen += len(msg.get("body", b""))
+                    if seen > cap:
+                        raise ValueError("request body too large")
+                return msg
+
+            emulator = inner_path.startswith(("/identitytoolkit.googleapis.com/", "/securetoken.googleapis.com/"))
+
+            async def watching_send(msg):
+                if msg["type"] == "http.response.start":
+                    st = msg["status"]
+                    if st in (401, 403) or (emulator and st == 400):
+                        self.limiter.fail(ip)
+                await send(msg)
+
+            return await target(scope, capped_receive, watching_send)
+
+        async def watching_ws_send(msg):
+            if msg["type"] == "websocket.close" and msg.get("code") == 1008:
+                self.limiter.fail(ip)
+            await send(msg)
+
+        return await target(scope, receive, watching_ws_send)

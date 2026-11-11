@@ -8,16 +8,25 @@ from .config import Config, load_env_file
 
 
 class _RedactToken(logging.Filter):
-    """Keeps the webhook token (part of the URL path) out of uvicorn's access log."""
+    """Keeps the webhook token and the app secret (both part of URL paths) out of uvicorn's logs."""
 
-    def __init__(self, token: str) -> None:
+    def __init__(self, *secrets: str) -> None:
         super().__init__()
-        self.token = token
+        self.secrets = [s for s in secrets if s]
+
+    def _clean(self, v):
+        if isinstance(v, str):
+            for s in self.secrets:
+                v = v.replace(s, "<secret>")
+        return v
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if self.token and isinstance(record.args, tuple):
-            record.args = tuple(a.replace(self.token, "<token>") if isinstance(a, str) else a
-                                for a in record.args)
+        if self.secrets:
+            if isinstance(record.args, tuple):
+                record.args = tuple(self._clean(a) for a in record.args)
+            elif isinstance(record.args, dict):
+                record.args = {k: self._clean(v) for k, v in record.args.items()}
+            record.msg = self._clean(record.msg)
         return True
 
 
@@ -38,16 +47,6 @@ def main() -> None:
         n = Engine(cfg).enroll(args[1], x, sr)
         print(f"added {n} voiceprints for {args[1]}")
         return
-    if args[:1] == ["pair"]:
-        # Lets the forked app sign in during the next ten minutes.
-        import time
-
-        from .appauth import open_pairing
-
-        until = open_pairing(cfg)
-        print("Sign-in is open until " + time.strftime("%H:%M", time.localtime(until))
-              + ". In the app, tap the local sign-in button.")
-        return
     if not cfg.token:
         sys.exit("Set OMIBRIDGE_TOKEN (a long random string) in .env first.")
     import uvicorn
@@ -56,22 +55,24 @@ def main() -> None:
 
     import threading
 
-    logging.getLogger("uvicorn.access").addFilter(_RedactToken(cfg.token))
+    redact = _RedactToken(cfg.token, cfg.app_secret)
+    for name in ("uvicorn.access", "uvicorn.error"):
+        logging.getLogger(name).addFilter(redact)
     app = create_app(cfg)
-    # Public port: the Omi webhook only (this is the one to put behind a tunnel).
-    threading.Thread(target=uvicorn.run, args=(app.state.public,), daemon=True,
-                     kwargs={"host": cfg.host, "port": cfg.port, "log_level": "warning"}).start()
+    public = app.state.public
     if cfg.app_secret:
-        # App API for the forked Omi app. Loopback or the Tailscale address, never the tunnel.
+        # The forked Omi app's API, under /app/<secret>/ on the same public port.
         from .appapi import AppAPI
 
-        api = AppAPI(cfg, app)
-        threading.Thread(target=uvicorn.run, args=(api.app,), daemon=True,
-                         kwargs={"host": cfg.app_host, "port": cfg.app_port, "log_level": "info",
-                                 "ws_ping_interval": 20}).start()
-        print(f"app API:  http://{cfg.app_host}:{cfg.app_port}/")
-    # Private port: review page and training API, loopback only.
+        public = AppAPI(cfg, app).public
+    # Public port: the Omi webhook (and the app API); this is the one behind the tunnel.
+    threading.Thread(target=uvicorn.run, args=(public,), daemon=True,
+                     kwargs={"host": cfg.host, "port": cfg.port, "log_level": "warning",
+                             "ws_ping_interval": 20}).start()
     print(f"webhook:  http://{cfg.host}:{cfg.port}/omi/audio/<token>")
+    if cfg.app_secret:
+        print(f"app API:  http://{cfg.host}:{cfg.port}/app/<secret>/")
+    # Private port: review page and training API, loopback only.
     print(f"review:   http://127.0.0.1:{cfg.port + 1}/")
     uvicorn.run(app, host="127.0.0.1", port=cfg.port + 1, log_level="info")
 

@@ -6,11 +6,15 @@ to the Firebase SDK, and the SDK exchanges it at the emulator's REST endpoints
 for an ID token and a refresh token. This module answers those few emulator
 calls itself, so no emulator, Node or Java is needed.
 
-Every token is an HS256 JWT signed with OMIBRIDGE_APP_SECRET. The Firebase SDK
-only decodes the payload (it never checks signatures), and the bridge checks the
-signature on every request, so a token is only good if this bridge made it.
-There is one account (OMIBRIDGE_APP_UID). Rotating the secret signs out every
-device.
+The real credential is OMIBRIDGE_APP_SECRET, which the app carries inside its
+API address (https://<host>/app/<secret>/) and so only ever sends inside TLS.
+The emulator calls are plain http by the SDK's design and cannot carry it, so
+nothing in them is secret: a custom token (issued only under the secret path,
+valid 60 seconds, single use), an ID token and a refresh token only identify a
+session, and are worthless without the path secret. All three are HS256 JWTs
+keyed from the secret (the SDK only decodes the payload); every API request
+checks both the path secret and the ID token. There is one account
+(OMIBRIDGE_APP_UID). Rotating the secret signs out every device.
 """
 from __future__ import annotations
 
@@ -19,20 +23,16 @@ import hashlib
 import hmac
 import json
 import logging
+import secrets
 import time
-from pathlib import Path
-
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import APIRouter, Form, Request
 from fastapi.responses import JSONResponse
-
-from .config import Config
 
 log = logging.getLogger("omibridge.appauth")
 
 PROJECT_ID = "demo-omi-local"   # the dev flavor's Firebase project (firebase_options_local.dart)
 ID_TOKEN_SECONDS = 3600
-CUSTOM_TOKEN_SECONDS = 300
-PAIRING_SECONDS = 600
+CUSTOM_TOKEN_SECONDS = 60
 
 
 def _b64(data: bytes) -> str:
@@ -50,6 +50,7 @@ class Tokens:
         self.key = hashlib.sha256(("omiomy-app:" + secret).encode()).digest()
         self.uid = uid
         self.clock = clock
+        self.used: dict[str, float] = {}   # custom-token ids already exchanged -> expiry
 
     def _sign(self, payload: dict) -> str:
         head = _b64(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
@@ -76,7 +77,8 @@ class Tokens:
 
     def custom_token(self) -> str:
         now = int(self.clock())
-        return self._sign({"omiomy": "custom", "uid": self.uid, "iat": now, "exp": now + CUSTOM_TOKEN_SECONDS})
+        return self._sign({"omiomy": "custom", "uid": self.uid, "iat": now, "exp": now + CUSTOM_TOKEN_SECONDS,
+                           "jti": secrets.token_hex(12)})
 
     def id_token(self, auth_time: int | None = None) -> str:
         now = int(self.clock())
@@ -94,8 +96,15 @@ class Tokens:
     def check_id(self, token: str) -> dict:
         return self._verify(token, "id")
 
-    def check_custom(self, token: str) -> dict:
-        return self._verify(token, "custom")
+    def redeem_custom(self, token: str) -> dict:
+        """A custom token works once."""
+        claims = self._verify(token, "custom")
+        now = self.clock()
+        self.used = {k: v for k, v in self.used.items() if v >= now}
+        if claims.get("jti") in self.used:
+            raise PermissionError("custom token already used")
+        self.used[claims["jti"]] = claims["exp"]
+        return claims
 
     def check_refresh(self, token: str) -> dict:
         return self._verify(token, "refresh")
@@ -107,39 +116,24 @@ class Tokens:
         return self.check_id(authorization.split(" ", 1)[1].strip())["user_id"]
 
 
-def pairing_file(cfg: Config) -> Path:
-    return cfg.app_dir / "pairing_until"
-
-
-def open_pairing(cfg: Config, seconds: int = PAIRING_SECONDS, clock=time.time) -> float:
-    cfg.app_dir.mkdir(parents=True, exist_ok=True)
-    until = clock() + seconds
-    pairing_file(cfg).write_text(str(until))
-    return until
-
-
-def pairing_open(cfg: Config, clock=time.time) -> bool:
-    if cfg.app_pairing == "open":
-        return True
-    try:
-        return float(pairing_file(cfg).read_text()) > clock()
-    except (OSError, ValueError):
-        return False
-
-
-def router(cfg: Config, tokens: Tokens) -> APIRouter:
+def custom_token_router(tokens: Tokens) -> APIRouter:
+    """Mounted under the secret path: knowing the secret is what lets a device sign in."""
     r = APIRouter()
 
     @r.post("/v1/auth/local-dev/custom-token")
     def custom_token(uid: str = Form("local-dev-user")):
         # The app asks for "local-dev-user"; there is only one account here, whatever it asks for.
-        if not pairing_open(cfg, tokens.clock):
-            log.warning("sign-in refused: pairing is closed (run `python -m omibridge pair`)")
-            raise HTTPException(403, "Sign-in is closed. On the Mac, run: python -m omibridge pair")
         log.info("issued a custom token")
         return {"custom_token": tokens.custom_token()}
 
-    # -- the Firebase Auth emulator's REST surface, as the Firebase SDK calls it ----
+    return r
+
+
+def emulator_router(tokens: Tokens) -> APIRouter:
+    """The Firebase Auth emulator's REST calls, at the root of the public port. They
+    only exchange a valid custom or refresh token for an ID token."""
+    r = APIRouter()
+
     @r.get("/")
     def emulator_root():
         # The app checks the emulator is reachable before signing in.
@@ -168,7 +162,7 @@ def router(cfg: Config, tokens: Tokens) -> APIRouter:
         body = await body_of(request)
         if action == "accounts:signInWithCustomToken":
             try:
-                tokens.check_custom(body.get("token", ""))
+                tokens.redeem_custom(body.get("token", ""))
             except PermissionError as e:
                 log.warning("custom token refused: %s", e)
                 return error("INVALID_CUSTOM_TOKEN")

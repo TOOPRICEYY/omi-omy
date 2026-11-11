@@ -1,0 +1,21 @@
+--- a/app/lib/env/env.dart	2026-11-11 10:52:12
++++ b/app/lib/env/env.dart	2026-11-11 10:52:12
+@@ -7,6 +7,8 @@
+ abstract class Env {
+   static const productionApiBaseUrl = 'https://api.omi.me/';
+   static const _apiBaseUrlFromDefine = String.fromEnvironment('OMI_API_BASE_URL');
++  // omi-omy: one public HTTPS host the local_dev profile may also use (a self-hosted backend).
++  static const _publicDevApiHost = String.fromEnvironment('OMI_DEV_PUBLIC_API_HOST');
+   static const firebaseAuthEmulatorHost = String.fromEnvironment(
+     'OMI_FIREBASE_AUTH_EMULATOR_HOST',
+     defaultValue: '127.0.0.1',
+@@ -222,6 +224,9 @@
+     if (host == 'localhost' || host == 'host.docker.internal' || host == '::1') {
+       return true;
+     }
++    if (_publicDevApiHost.isNotEmpty && uri.scheme == 'https' && host == _publicDevApiHost.toLowerCase()) {
++      return true;
++    }
+     // A Tailscale MagicDNS name. It resolves into 100.64.0.0/10 — the same
+     // shared address space accepted below — so it is exactly as private as the
+     // literal address, and it is the better thing to configure: a tailnet

@@ -69,16 +69,11 @@ class Config:
     omi_api_base: str = field(default_factory=lambda: os.environ.get("OMI_API_BASE", "https://api.omi.me"))
 
     # The app API: what the forked Omi app (dev flavor) talks to instead of Omi's
-    # servers. Off unless OMIBRIDGE_APP_SECRET is set. Never put this port behind
-    # the public tunnel; bind it to loopback or the Tailscale address.
+    # servers. Served on the public port under /app/<OMIBRIDGE_APP_SECRET>/; off while
+    # the secret is empty. The Firebase sign-in emulator calls sit at the root.
     app_secret: str = field(default_factory=lambda: os.environ.get("OMIBRIDGE_APP_SECRET", ""))
-    app_host: str = field(default_factory=lambda: os.environ.get("OMIBRIDGE_APP_HOST", "127.0.0.1"))
-    app_port: int = field(default_factory=lambda: int(os.environ.get("OMIBRIDGE_APP_PORT", "8379")))
     # The single account the app signs in as.
     app_uid: str = field(default_factory=lambda: os.environ.get("OMIBRIDGE_APP_UID", "owner"))
-    # "open" lets any device that reaches the port sign in (tests, simulator).
-    # Otherwise sign-in only works for a few minutes after `python -m omibridge pair`.
-    app_pairing: str = field(default_factory=lambda: os.environ.get("OMIBRIDGE_APP_PAIRING", ""))
 
     @property
     def app_dir(self) -> Path:

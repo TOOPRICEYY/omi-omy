@@ -1,0 +1,6 @@
+245f8174b1793ecfc1c121d1c66f7375df9b3909
+# Line 1: the BasedHardware/omi commit scripts/build_fork.sh builds. Bump it on purpose,
+# after checking that the app's API (listen socket messages, conversation shape,
+# sync-local-files) still matches omibridge/appapi.py.
+# Flutter version upstream pins for that commit (.github/workflows/mobile-app-checks.yml):
+FLUTTER=3.44.5

@@ -11,11 +11,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from omibridge.appapi import AppAPI, to_omi
-from omibridge.appauth import Tokens, open_pairing
+from omibridge.appauth import Tokens
 from omibridge.config import Config
 from omibridge.server import create_app
 
 SR = 16000
+SECRET = "s3cret-" + "x" * 40
+P = f"/app/{SECRET}"     # every app API call goes under the secret path
 
 
 class FakeGallery:
@@ -59,17 +61,16 @@ class FakeEngine:
 @pytest.fixture
 def env(tmp_path):
     now = [1_800_000_000.0]
-    cfg = Config(data_dir=tmp_path, token="t", idle_seconds=10, min_speech_seconds=2, app_secret="s3cret",
-                 app_uid="owner", wearer="Ana", app_pairing="")
+    cfg = Config(data_dir=tmp_path, token="t", idle_seconds=10, min_speech_seconds=2, app_secret=SECRET,
+                 app_uid="owner", wearer="Ana")
     bridge = create_app(cfg, engine=FakeEngine(cfg), start_workers=False, clock=lambda: now[0])
     api = AppAPI(cfg, bridge, clock=lambda: now[0])
-    client = TestClient(api.app)
+    client = TestClient(api.public)        # the public port, as the tunnel sees it
     return cfg, now, bridge, api, client
 
 
 def sign_in(cfg, client, now):
-    open_pairing(cfg, clock=lambda: now[0])
-    r = client.post("/v1/auth/local-dev/custom-token", data={"uid": "local-dev-user"})
+    r = client.post(f"{P}/v1/auth/local-dev/custom-token", data={"uid": "local-dev-user"})
     assert r.status_code == 200, r.text
     custom = r.json()["custom_token"]
     r = client.post("/identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=x",
@@ -109,8 +110,12 @@ def tone(seconds, level=0.3):
 def test_sign_in_flow_and_token_check(env):
     cfg, now, _, api, client = env
     assert client.get("/").status_code == 200                       # emulator reachability probe
-    # Pairing closed: no custom token.
-    assert client.post("/v1/auth/local-dev/custom-token", data={"uid": "x"}).status_code == 403
+    # Without the secret path there is no API at all: the same 404 as any unknown path.
+    unknown = client.post("/nothing-here", data={"uid": "x"})
+    for path in ("/v1/auth/local-dev/custom-token", "/app/wrong/v1/auth/local-dev/custom-token",
+                 f"/app/{SECRET[:-1]}/v1/auth/local-dev/custom-token"):
+        r = client.post(path, data={"uid": "x"})
+        assert (r.status_code, r.content) == (unknown.status_code, unknown.content) == (404, unknown.content)
     s = sign_in(cfg, client, now)
     assert s["localId"] == "owner" and s["expiresIn"] == "3600"
     claims = json.loads(base64.urlsafe_b64decode(s["idToken"].split(".")[1] + "=="))
@@ -126,15 +131,15 @@ def test_sign_in_flow_and_token_check(env):
                     data={"grant_type": "refresh_token", "refresh_token": s["refreshToken"]})
     assert r.status_code == 200
     # API routes need a token this bridge made.
-    assert client.get("/v1/users/onboarding").status_code == 401
+    assert client.get(f"{P}/v1/users/onboarding").status_code == 401
     forged = Tokens("other-secret", "owner").id_token()
-    assert client.get("/v1/users/onboarding", headers=auth(forged)).status_code == 401
-    assert client.get("/v1/users/onboarding", headers=auth(s["refreshToken"])).status_code == 401
-    r = client.get("/v1/users/onboarding", headers=auth(s["idToken"]))
+    assert client.get(f"{P}/v1/users/onboarding", headers=auth(forged)).status_code == 401
+    assert client.get(f"{P}/v1/users/onboarding", headers=auth(s["refreshToken"])).status_code == 401
+    r = client.get(f"{P}/v1/users/onboarding", headers=auth(s["idToken"]))
     assert r.status_code == 200 and r.json()["completed"] is True
     # Expired ID tokens are refused.
     now[0] += 3601
-    assert client.get("/v1/users/onboarding", headers=auth(s["idToken"])).status_code == 401
+    assert client.get(f"{P}/v1/users/onboarding", headers=auth(s["idToken"])).status_code == 401
     # A bad custom token is refused by the emulator endpoint.
     r = client.post("/identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken",
                     json={"token": forged})
@@ -145,8 +150,8 @@ def test_other_routes_are_404(env):
     cfg, now, _, _, client = env
     idt = sign_in(cfg, client, now)["idToken"]
     for path in ("/v3/memories", "/v2/messages", "/v1/apps", "/v1/users/me/subscription", "/v1/goals"):
-        assert client.get(path, headers=auth(idt)).status_code == 404
-    assert client.get("/v1/account/cutover/control", headers=auth(idt)).json()["product_traffic_allowed"] is True
+        assert client.get(P + path, headers=auth(idt)).status_code == 404
+    assert client.get(f"{P}/v1/account/cutover/control", headers=auth(idt)).json()["product_traffic_allowed"] is True
 
 
 # -- conversations -------------------------------------------------------------------
@@ -176,19 +181,19 @@ def test_list_detail_delete_people(env):
     from omibridge.importer import queue_recording
 
     (cid,) = queue_recording(cfg, tone(5), SR, started_at=now[0] - 60, now=now[0])
-    listed = client.get("/v1/conversations", headers=auth(idt)).json()
+    listed = client.get(f"{P}/v1/conversations", headers=auth(idt)).json()
     assert [c["status"] for c in listed] == ["processing"]
-    assert client.get("/v1/conversations?statuses=in_progress", headers=auth(idt)).json() == []
+    assert client.get(f"{P}/v1/conversations?statuses=in_progress", headers=auth(idt)).json() == []
     bridge.state.process_one(cid)
-    (c,) = client.get("/v1/conversations?limit=10&offset=0&statuses=", headers=auth(idt)).json()
+    (c,) = client.get(f"{P}/v1/conversations?limit=10&offset=0&statuses=", headers=auth(idt)).json()
     assert c["id"] == cid and c["structured"]["title"] == "Lunch plans" and len(c["transcript_segments"]) == 2
-    assert client.get(f"/v1/conversations/{cid}", headers=auth(idt)).json()["id"] == cid
-    assert client.get("/v1/conversations/nope", headers=auth(idt)).status_code == 404
-    people = client.get("/v1/users/people", headers=auth(idt)).json()
+    assert client.get(f"{P}/v1/conversations/{cid}", headers=auth(idt)).json()["id"] == cid
+    assert client.get(f"{P}/v1/conversations/nope", headers=auth(idt)).status_code == 404
+    people = client.get(f"{P}/v1/users/people", headers=auth(idt)).json()
     assert [p["name"] for p in people] == ["Bo"] and people[0]["id"] == "p-bo"   # the wearer is not a "person"
-    assert client.delete(f"/v1/conversations/{cid}", headers=auth(idt)).status_code == 204
+    assert client.delete(f"{P}/v1/conversations/{cid}", headers=auth(idt)).status_code == 204
     assert (cfg.trash_dir / cid / "conversation.json").exists()                     # moved, not erased
-    assert client.get("/v1/conversations", headers=auth(idt)).json() == []
+    assert client.get(f"{P}/v1/conversations", headers=auth(idt)).json() == []
 
 
 # -- live socket ----------------------------------------------------------------------
@@ -196,10 +201,10 @@ def test_listen_socket_to_conversation(env):
     cfg, now, bridge, api, client = env
     idt = sign_in(cfg, client, now)["idToken"]
     with pytest.raises(Exception):
-        with client.websocket_connect("/v4/listen?codec=opus&sample_rate=16000") as ws:
+        with client.websocket_connect(f"{P}/v4/listen?codec=opus&sample_rate=16000") as ws:
             ws.receive_text()                      # no token: refused
     packets = opus_packets(tone(4))
-    with client.websocket_connect("/v4/listen?codec=opus&sample_rate=16000&uid=owner&language=en",
+    with client.websocket_connect(f"{P}/v4/listen?codec=opus&sample_rate=16000&uid=owner&language=en",
                                   headers=auth(idt)) as ws:
         assert json.loads(ws.receive_text())["type"] == "service_status"
         ws.send_text(json.dumps({"type": "client_state", "foreground": True}))   # ignored
@@ -209,7 +214,7 @@ def test_listen_socket_to_conversation(env):
         deadline = time.time() + 5
         while not api.sessions.sessions and time.time() < deadline:
             time.sleep(0.05)
-        r = client.post("/v1/conversations", headers=auth(idt), json={})
+        r = client.post(f"{P}/v1/conversations", headers=auth(idt), json={})
         assert r.status_code == 200, r.text
         cid = r.json()["conversation"]["id"]
         assert r.json()["conversation"]["status"] == "processing"
@@ -219,7 +224,7 @@ def test_listen_socket_to_conversation(env):
         created = json.loads(ws.receive_text())
         assert created["type"] == "memory_created" and created["memory"]["id"] == cid
         assert created["memory"]["transcript_segments"][0]["text"] == "Lunch at noon?"
-    assert client.post("/v1/conversations", headers=auth(idt), json={}).status_code == 404   # nothing open now
+    assert client.post(f"{P}/v1/conversations", headers=auth(idt), json={}).status_code == 404   # nothing open now
     assert api.coverage.covered(now[0] - 1, now[0]) > 0.9         # (frozen test clock: all audio lands at "now")
 
 
@@ -236,13 +241,13 @@ def test_sync_upload_decode_and_dedupe(env):
     api.coverage.add(t0 + 100, t0 + 110)
     files = [("files", (f"audio_omi_opus_16000_1_fs160_{t0}.bin", wal_file(opus_packets(tone(6))))),
              ("files", (f"audio_omi_opus_16000_1_fs160_{(t0 + 100) * 1000}.bin", wal_file(opus_packets(tone(6)))))]
-    r = client.post("/v2/sync-local-files", headers=auth(idt), files=files)
+    r = client.post(f"{P}/v2/sync-local-files", headers=auth(idt), files=files)
     assert r.status_code == 202, r.text
     job = r.json()
     assert {"job_id", "status", "total_files", "total_segments", "poll_after_ms"} <= set(job)
     deadline = time.time() + 10
     while True:
-        st = client.get(f"/v2/sync-local-files/{job['job_id']}", headers=auth(idt)).json()
+        st = client.get(f"{P}/v2/sync-local-files/{job['job_id']}", headers=auth(idt)).json()
         if st["status"] != "processing" or time.time() > deadline:
             break
         time.sleep(0.05)
@@ -252,14 +257,66 @@ def test_sync_upload_decode_and_dedupe(env):
     meta = json.loads((cfg.queue_dir / f"{new[0]}.json").read_text())
     assert abs(meta["started_at"] - t0) < 4                         # start time from the file name
     # The same upload again: everything is covered now, nothing new.
-    r = client.post("/v2/sync-local-files", headers=auth(idt), files=files)
+    r = client.post(f"{P}/v2/sync-local-files", headers=auth(idt), files=files)
     jid = r.json()["job_id"]
     deadline = time.time() + 10
-    while (st := client.get(f"/v2/sync-local-files/{jid}", headers=auth(idt)).json())["status"] == "processing":
+    while (st := client.get(f"{P}/v2/sync-local-files/{jid}", headers=auth(idt)).json())["status"] == "processing":
         assert time.time() < deadline
         time.sleep(0.05)
     assert st["result"]["new_memories"] == []
     # Bad names are refused outright (terminal for the app).
-    bad = client.post("/v2/sync-local-files", headers=auth(idt), files=[("files", ("x.wav", b"1234"))])
+    bad = client.post(f"{P}/v2/sync-local-files", headers=auth(idt), files=[("files", ("x.wav", b"1234"))])
     assert bad.status_code == 400
-    assert client.get("/v2/sync-local-files/unknown", headers=auth(idt)).status_code == 404
+    assert client.get(f"{P}/v2/sync-local-files/unknown", headers=auth(idt)).status_code == 404
+
+
+# -- public-port protections ---------------------------------------------------------------
+def test_custom_token_single_use_and_short_lived(env):
+    cfg, now, _, api, client = env
+    custom = client.post(f"{P}/v1/auth/local-dev/custom-token").json()["custom_token"]
+    url = "/identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken"
+    assert client.post(url, json={"token": custom}).status_code == 200
+    assert client.post(url, json={"token": custom}).status_code == 400          # used up
+    late = client.post(f"{P}/v1/auth/local-dev/custom-token").json()["custom_token"]
+    now[0] += 61
+    assert client.post(url, json={"token": late}).status_code == 400            # expired
+
+
+def test_api_needs_secret_and_token(env):
+    cfg, now, _, api, client = env
+    idt = sign_in(cfg, client, now)["idToken"]
+    assert client.get("/v1/conversations", headers=auth(idt)).status_code == 404       # token, no secret
+    assert client.get("/app/nope/v1/conversations", headers=auth(idt)).status_code == 404
+    assert client.get(f"{P}/v1/conversations").status_code == 401                      # secret, no token
+    assert client.get(f"{P}/v1/conversations", headers=auth(idt)).status_code == 200
+    assert client.post("/omi/audio/wrong?uid=x&sample_rate=16000", content=b"").status_code == 403   # webhook kept
+
+
+def test_body_caps(env):
+    cfg, now, _, api, client = env
+    big = b"x" * (300 * 1024)
+    r = client.post("/identitytoolkit.googleapis.com/v1/accounts:lookup", content=big,
+                    headers={"content-type": "application/json"})
+    assert r.status_code == 413
+
+
+def test_failed_checks_block_the_address(env):
+    cfg, now, _, api, client = env
+    hdr = {"CF-Connecting-IP": "203.0.113.9"}
+    for _ in range(30):
+        client.get("/app/guess/v1/conversations", headers=hdr)
+    assert client.get(f"{P}/v1/health", headers=hdr).status_code == 429               # blocked, even with the secret
+    assert client.get(f"{P}/v1/health", headers={"CF-Connecting-IP": "198.51.100.1"}).status_code == 200
+    now[0] += 901
+    assert client.get(f"{P}/v1/health", headers=hdr).status_code == 200               # block expires
+
+
+def test_log_redaction():
+    import logging
+
+    from omibridge.__main__ import _RedactToken
+
+    rec = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, '%s - "%s %s"', ("1.2.3.4", "GET", f"{P}/v1/x"),
+                            None)
+    _RedactToken("tok", SECRET).filter(rec)
+    assert SECRET not in rec.getMessage() and "/app/<secret>/v1/x" in rec.getMessage()
