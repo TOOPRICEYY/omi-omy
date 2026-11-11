@@ -264,6 +264,18 @@ def test_sync_upload_decode_and_dedupe(env):
         assert time.time() < deadline
         time.sleep(0.05)
     assert st["result"]["new_memories"] == []
+    # Two recordings far apart in one upload stay two conversations.
+    t1 = t0 + 7200
+    files = [("files", (f"audio_omi_opus_16000_1_fs160_{t1}.bin", wal_file(opus_packets(tone(6))))),
+             ("files", (f"audio_omi_opus_16000_1_fs160_{t1 + 1800}.bin", wal_file(opus_packets(tone(6)))))]
+    jid = client.post(f"{P}/v2/sync-local-files", headers=auth(idt), files=files).json()["job_id"]
+    deadline = time.time() + 10
+    while (st := client.get(f"{P}/v2/sync-local-files/{jid}", headers=auth(idt)).json())["status"] == "processing":
+        assert time.time() < deadline
+        time.sleep(0.05)
+    starts = sorted(json.loads((cfg.queue_dir / f"{c}.json").read_text())["started_at"]
+                    for c in st["result"]["new_memories"])
+    assert len(starts) == 2 and abs(starts[0] - t1) < 4 and abs(starts[1] - (t1 + 1800)) < 4
     # Bad names are refused outright (terminal for the app).
     bad = client.post(f"{P}/v2/sync-local-files", headers=auth(idt), files=[("files", ("x.wav", b"1234"))])
     assert bad.status_code == 400

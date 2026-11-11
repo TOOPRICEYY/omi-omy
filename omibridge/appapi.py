@@ -241,6 +241,10 @@ class AppAPI:
                 chunk = pcm[i: i + CHUNK_SAMPLES]
                 a = start + i / SR
                 b = a + len(chunk) / SR
+                # Close what went quiet before this chunk starts; otherwise a recording made
+                # an hour later would be appended to the previous conversation.
+                clock["now"] = a
+                new += mgr.sweep()
                 clock["now"] = b
                 if self.coverage.covered(a, b) < 0.5:
                     res = mgr.ingest(key, SR, chunk.astype("<i2").tobytes())
