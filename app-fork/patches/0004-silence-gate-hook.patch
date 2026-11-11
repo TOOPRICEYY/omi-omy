@@ -1,0 +1,75 @@
+diff --git a/app/lib/pages/settings/settings_groups.dart b/app/lib/pages/settings/settings_groups.dart
+index 4cc4e9161..592473366 100644
+--- a/app/lib/pages/settings/settings_groups.dart
++++ b/app/lib/pages/settings/settings_groups.dart
+@@ -1,4 +1,6 @@
+ import 'dart:io';
++import 'package:omi/omiomy.dart';
++import 'package:omi/omiomy_pendant_gate.dart';
+ 
+ import 'package:flutter/material.dart';
+ 
+@@ -244,6 +246,17 @@ class _RecordingGroupPageState extends State<RecordingGroupPage> with _GroupRows
+               value: _prefs.batchModeEnabled,
+               onChanged: _setTranscribeLater,
+             ),
++            // omi-omy: phone-side silence gate for pendant audio (lib/omiomy_silence_gate.dart).
++            if (omiomyBuild)
++              OmiSettingsRow.toggle(
++                key: const ValueKey('settings_row_omiomySilenceGate'),
++                leading: const FaIcon(FontAwesomeIcons.volumeXmark),
++                title: 'Skip silence on the phone',
++                subtitle: 'Hold back pendant audio while nobody speaks. Saves upload and battery; '
++                    'conversations come out the same.',
++                value: OmiomyPendantGate.enabled,
++                onChanged: (value) => setState(() => OmiomyPendantGate.enabled = value),
++              ),
+             if (PlatformService.isAndroid)
+               OmiSettingsRow.toggle(
+                 key: const ValueKey('settings_row_backgroundMode'),
+diff --git a/app/lib/services/capture/capture_controller.dart b/app/lib/services/capture/capture_controller.dart
+index 645998df9..6d5074a6c 100644
+--- a/app/lib/services/capture/capture_controller.dart
++++ b/app/lib/services/capture/capture_controller.dart
+@@ -99,6 +99,9 @@ import 'package:omi/utils/l10n_extensions.dart';
+ import 'package:omi/services/battery_widget_service.dart';
+ import 'package:omi/utils/debug_log_manager.dart';
+ import 'package:omi/utils/logger.dart';
++import 'package:omi/omiomy.dart';
++import 'package:omi/omiomy_pendant_gate.dart';
++import 'package:omi/omiomy_silence_gate.dart';
+ import 'package:omi/app_globals.dart';
+ 
+ import 'package:omi/backend/schema/message_event.dart'
+@@ -2404,6 +2407,22 @@ class CaptureController extends ChangeNotifier
+       _socket?.state == SocketServiceState.connected ? _sendPendantToSocket : null;
+ 
+   void _sendPendantToSocket(HeldPendantFrame frame) {
++    // omi-omy: the phone-side silence gate (off unless switched on) may hold or drop silent packets.
++    final socket = _socket;
++    if (omiomyBuild &&
++        OmiomyPendantGate.instance.offer(
++          socket: socket,
++          codec: socket?.codec,
++          frame: frame,
++          sendNow: _sendPendantToSocketNow,
++          sendText: (text) => _socket?.send(text),
++        )) {
++      return;
++    }
++    _sendPendantToSocketNow(frame);
++  }
++
++  void _sendPendantToSocketNow(HeldPendantFrame frame) {
+     final socketPayload = frame.payload;
+     final positionedFrame = frame.positioned;
+     if (positionedFrame?.captureRoot != null && positionedFrame!.payload.length == socketPayload.length) {
+@@ -4295,6 +4314,8 @@ class CaptureController extends ChangeNotifier
+         } else {
+           origin = anchor;
+           spans = [for (final segment in valid) (anchor + segment.start.floor(), anchor + segment.end.ceil())];
++          // omi-omy: silence the gate dropped (the bridge filled it in) counts as covered.
++          if (omiomyBuild) spans = [...spans, ...OmiomyDroppedSpans.instance.spans];
+         }
+       }
+     }

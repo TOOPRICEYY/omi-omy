@@ -74,6 +74,8 @@ for p in "$HERE"/app-fork/patches/*.patch(N); do
   echo "applying ${p:t}"
   git apply --3way --whitespace=nowarn "$p" 2>/dev/null || git apply --whitespace=nowarn "$p"
 done
+# New files (no conflicts possible): copied over the tree, e.g. lib/omiomy_silence_gate.dart.
+cp -R "$HERE/app-fork/overlay/." app/
 
 # 2. Omi's own setup steps for the dev flavor (setup.sh is bash; its main block only runs when executed).
 cd app

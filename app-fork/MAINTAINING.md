@@ -127,9 +127,37 @@ hand if it no longer applies.
    `OMI_FIREBASE_AUTH_EMULATOR_HOST=<host>`, `OMI_FIREBASE_AUTH_EMULATOR_PORT=443`
    (or the loopback port), `OMI_DEV_PUBLIC_API_HOST=<host>`.
 
-Not yet done, planned: a phone-side silence gate in
-`CaptureController._sendPendantToSocket` (`services/capture/capture_controller.dart`)
-reusing `SileroMobileBatchVad` (`services/wals/mobile_batch_vad.dart`).
+6. **Phone-side silence gate**: `app-fork/overlay/lib/omiomy_silence_gate.dart` (the logic),
+   `app-fork/overlay/lib/omiomy_pendant_gate.dart` (the glue), copied into `app/lib/` by the
+   build script, and `app-fork/patches/0004-silence-gate-hook.patch` (`capture_controller.dart`
+   and `settings_groups.dart`, +34 lines).
+   Intent: while nobody speaks, hold pendant Opus packets instead of sending them; at speech
+   onset send `{"type":"omiomy_silence_gap","ms":N}` (N = audio dropped, not the pre-roll),
+   then the last second of held packets, then live packets; keep sending 3 s after the last
+   speech. The bridge refills the gap with silence, so the output does not change. Detector:
+   the app's own `SileroMobileBatchVad` (`services/wals/mobile_batch_vad.dart`), threshold 0.3,
+   on Opus 10 ms and 20 ms frames only. Fails open on any detector error, a backlog over 300
+   packets, a missing model or a non-Opus codec. Off by default; Settings > Recording &
+   transcription > "Skip silence on the phone" (preference `omiomySilenceGate`; the define
+   `OMIOMY_SILENCE_GATE=true` changes the default).
+   Hooks: `CaptureController._sendPendantToSocket` asks `OmiomyPendantGate.instance.offer`
+   first and otherwise sends as before (the original body is now `_sendPendantToSocketNow`).
+   In `_confirmSessionTranscript`, the wall-clock spans the gate dropped
+   (`OmiomyDroppedSpans`) are added to the transcript spans, so the app's audio log counts
+   that silence as covered and does not upload it again through offline sync. Silence with
+   no conversation at all was never covered by a transcript and is still uploaded later,
+   gate or not (Omi's own behaviour); the bridge skips it as already heard.
+   Checked in the source: the socket stays open with nothing sent (WebSocket pings every
+   20 s from both ends, no idle timeout in `pure_socket.dart`); the capture watchdog's
+   "bytes sent, no transcript" rule is telemetry only, and its "no bytes" rule watches
+   Bluetooth input, which the gate does not touch. Turning the switch off mid-session drops
+   up to one second of held silence without a gap note (a sub-second timing shift).
+   By hand: wrap the send function so packets pass through the gate first; keep the gap note
+   in the same socket and in order before the first packet after a pause.
+   Verify: `flutter test test/omiomy_silence_gate_test.dart` in the build tree (onset with
+   pre-roll, hangover, exact gap ms, 20 ms frames, fail open, backlog). End to end it needs a
+   pendant; with the switch on, the bridge log shows fewer packets and the same conversation.
+
 
 ## Building
 
