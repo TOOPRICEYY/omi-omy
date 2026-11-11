@@ -38,9 +38,11 @@ pinned down by `tests/test_appapi.py`. Paths below are relative to the API base
 constant time by `PublicGate`; a wrong secret falls through to the same plain 404 any
 unknown path gets) and, for everything except the sign-in bootstrap and `/v1/health`,
 an `Authorization: Bearer <ID token>` made by this bridge for `OMIBRIDGE_APP_UID`.
-Tokens are HS256 JWTs keyed from the secret. Failed checks (bad secret, 401/403,
-refused sign-in tokens) count per client address (`CF-Connecting-IP`); 30 in ten
-minutes block that address for 15 minutes. Bodies are capped (128 MB for sync
+Tokens are HS256 JWTs keyed from the secret. Failed checks made without the secret
+(a wrong secret, a wrong webhook token, refused sign-in tokens at the root) count per
+client address (`CF-Connecting-IP`); 30 in ten minutes block that address for 15
+minutes. A request under the right secret is never counted and never blocked, so a
+phone with a stale token cannot lock itself out while it is recording. Bodies are capped (128 MB for sync
 uploads, 1 MB for the webhook, 256 KB otherwise).
 
 **Sign-in.** The app's local-dev sign-in button calls
