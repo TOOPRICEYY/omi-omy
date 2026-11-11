@@ -142,13 +142,28 @@ The script resets `~/omi-fork` (it refuses to touch a tree without its
 `flutter build ios --simulator --debug --flavor dev`. The simulator needs a UDID; the
 script resolves `OMI_SIM_DEVICE` (default "iPhone 17").
 
-Signing for a real iPhone is not automated yet. It needs the owner's Apple team
-instead of Omi's (`DEVELOPMENT_TEAM = 9536L8KLMP` in `ios/Runner.xcodeproj`), own
-bundle ids for the app, the watch app (`$(APP_BUNDLE_IDENTIFIER).watchapp`) and the
-widget (`.widget`), an own app group in place of `group.com.friend-app-with-wearable.ios12`,
-and Omi's associated domains removed from the entitlements. Do those edits in the
-build script, never in a committed patch to the project file. TestFlight uploads can
-use the App Store Connect API key described in the owner's DoesTrack notes.
+**Device / TestFlight build.** `OMI_FORK_DEVICE=1` (plus `OMI_FORK_UPLOAD=1` to send it
+to TestFlight) runs `app-fork/device_overlay.py` after Omi's setup steps. It replaces Omi's
+Apple team with `OMI_APPLE_TEAM` in every target, sets the dev flavor's bundle id and name
+(`OMI_BUNDLE_ID`, default `com.gabrielprice.omiomy`; `OMI_APP_NAME`, default "Omi Omy"; the
+watch app and widget follow as `.watchapp` and `.widget`), points Firebase's
+`GoogleService-Info.plist` at that bundle id, renames the app group to `group.<bundle id>`
+in the entitlements and the Swift sources that use it, and drops entitlements the build does
+not use (push, Sign in with Apple, Omi's associated domains, HealthKit). Every edit must
+match or the build stops. The script then runs `flutter build ios --release --no-codesign`,
+`xcodebuild archive` with automatic signing (`-allowProvisioningUpdates` and the App Store
+Connect key from `ASC_KEY_PATH`, `ASC_KEY_ID`, `ASC_ISSUER_ID`), and, when asked, uploads with
+`app-fork/ExportOptions-TestFlight.plist`. Build numbers are `yyyymmddHHMM`. All defines,
+the secret included, go through an owner-only file passed with `--dart-define-from-file`;
+Flutter also writes them into `ios/Flutter/Generated.xcconfig`, which the script makes
+owner-only.
+
+Known limit (2026-11-11): with Xcode 27 the API key alone did not let `xcodebuild` create
+the app's identifiers and profiles ("Authentication failed"), although the same key works
+against the App Store Connect API. Archiving needed an Apple ID signed in to Xcode
+(Settings > Accounts) on the Mac mini; uploading works with the key. A new app also needs
+its App Store Connect record created by hand (Apps > + > New App) before the first upload;
+Apple's API cannot create it.
 
 ## Checking a build
 
