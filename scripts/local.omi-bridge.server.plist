@@ -20,7 +20,7 @@
 	<key>ThrottleInterval</key>
 	<integer>15</integer>
 	<key>ProcessType</key>
-	<string>Background</string>
+	<string>Adaptive</string>
 	<key>StandardOutPath</key>
 	<string>__ROOT__/logs/server.log</string>
 	<key>StandardErrorPath</key>

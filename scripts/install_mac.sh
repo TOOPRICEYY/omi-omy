@@ -30,6 +30,12 @@ if [ ! -f .env ]; then
   chmod 600 .env
   echo "Created .env with a new webhook token. Add OPENROUTER_API_KEY to it."
 fi
+# Signing key for the forked app's sign-in (omibridge/appauth.py). Added once, never printed.
+if ! grep -q '^OMIBRIDGE_APP_SECRET=[^ #]' .env; then
+  .venv/bin/python -I -c 'import secrets; print("OMIBRIDGE_APP_SECRET=" + secrets.token_urlsafe(32))' >> .env
+  chmod 600 .env
+  echo "Added OMIBRIDGE_APP_SECRET to .env (the app API for the forked Omi app)."
+fi
 
 .venv/bin/python -m pytest -q tests
 

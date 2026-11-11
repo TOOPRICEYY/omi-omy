@@ -58,6 +58,26 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
     status = {"processing": None, "last_error": None, "processed": 0}
     app = FastAPI(title="omi-omy bridge")
     app.state.cfg, app.state.engine, app.state.sessions, app.state.jobs = cfg, engine, sessions, jobs
+    # Objects with optional queued(cid) / processed(cid, doc) methods (the app API uses this
+    # to tell a connected phone when its conversation is ready).
+    listeners: list = []
+    app.state.listeners = listeners
+
+    def notify(event: str, *args) -> None:
+        for lst in list(listeners):
+            fn = getattr(lst, event, None)
+            if fn is None:
+                continue
+            try:
+                fn(*args)
+            except Exception:
+                log.exception("listener %s failed", event)
+
+    def enqueue(cid: str) -> None:
+        jobs.put(cid)
+        notify("queued", cid)
+
+    app.state.enqueue = enqueue
 
     def summarize(cid: str) -> dict | None:
         """Never raises: a conversation without a summary is still a conversation."""
@@ -86,6 +106,7 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
             pcm.unlink(missing_ok=True)
             meta_p.unlink(missing_ok=True)
             status["processed"] += 1
+            notify("processed", cid, doc)
         except Exception as e:
             status["last_error"] = f"{cid}: {e}"
             log.exception("processing %s failed", cid)
@@ -101,7 +122,7 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
         while True:
             time.sleep(5)
             for cid in sessions.sweep():
-                jobs.put(cid)
+                enqueue(cid)
 
     app.state.process_one = process_one
     if start_workers:
@@ -134,7 +155,7 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
             log.exception("ingest failed")
             return {"state": "error"}
         if res.get("id"):
-            jobs.put(res["id"])
+            enqueue(res["id"])
         return res
 
     # Only the webhook goes on the port that the tunnel exposes.
@@ -180,7 +201,7 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
         except Exception:
             raise HTTPException(400, "could not read that file as audio (WAV, FLAC, MP3 and OGG work)")
         for cid in ids:
-            jobs.put(cid)
+            enqueue(cid)
         return {"queued": ids}
 
     @app.get("/api/conversations/{cid}")

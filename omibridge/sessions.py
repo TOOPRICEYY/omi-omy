@@ -109,6 +109,12 @@ class SessionManager:
                         closed.append(cid)
         return closed
 
+    def close(self, uid: str) -> str | None:
+        """End `uid`'s conversation now (the app's "stop" button). Returns the queued id, if any."""
+        with self.lock:
+            s = self.sessions.get(uid)
+            return self._close(s, self.clock()) if s is not None else None
+
     def _close(self, s: Session, now: float) -> str | None:
         self.sessions.pop(s.uid, None)
         src = self._path(s.uid)
