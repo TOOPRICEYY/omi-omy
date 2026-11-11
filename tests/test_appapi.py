@@ -307,10 +307,26 @@ def test_failed_checks_block_the_address(env):
     hdr = {"CF-Connecting-IP": "203.0.113.9"}
     for _ in range(30):
         client.get("/app/guess/v1/conversations", headers=hdr)
-    assert client.get(f"{P}/v1/health", headers=hdr).status_code == 429               # blocked, even with the secret
-    assert client.get(f"{P}/v1/health", headers={"CF-Connecting-IP": "198.51.100.1"}).status_code == 200
+    assert client.get("/app/guess/v1/conversations", headers=hdr).status_code == 429  # blocked
+    assert client.get("/", headers=hdr).status_code == 429                            # sign-in calls too
+    assert client.get(f"{P}/v1/health", headers=hdr).status_code == 200               # never with the right secret
+    assert client.get("/app/guess/v1/health", headers={"CF-Connecting-IP": "198.51.100.1"}).status_code == 404
     now[0] += 901
-    assert client.get(f"{P}/v1/health", headers=hdr).status_code == 200               # block expires
+    assert client.get("/app/guess/v1/conversations", headers=hdr).status_code == 404  # block expires
+
+
+def test_right_secret_is_never_locked_out(env):
+    """A phone with a stale token must not block itself (it may be recording)."""
+    cfg, now, _, api, client = env
+    hdr = {"CF-Connecting-IP": "203.0.113.10"}
+    for _ in range(40):
+        assert client.get(f"{P}/v1/conversations", headers=hdr | auth("stale")).status_code == 401
+    assert client.get("/", headers=hdr).status_code == 200
+    idt = sign_in(cfg, client, now)["idToken"]
+    assert client.get(f"{P}/v1/conversations", headers=hdr | auth(idt)).status_code == 200
+    r = client.post("/identitytoolkit.googleapis.com/v1/accounts:lookup", content=b"{not json",
+                    headers={"content-type": "application/json"})
+    assert r.status_code == 400
 
 
 def test_log_redaction():

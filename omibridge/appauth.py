@@ -139,7 +139,7 @@ def emulator_router(tokens: Tokens) -> APIRouter:
     @r.get("/")
     def emulator_root():
         # The app checks the emulator is reachable before signing in.
-        return {"authEmulator": {"ready": True}, "service": "omi-omy bridge"}
+        return {"authEmulator": {"ready": True}}
 
     def error(message: str, code: int = 400) -> JSONResponse:
         return JSONResponse({"error": {"code": code, "message": message, "errors": [{"message": message}]}},
@@ -149,11 +149,15 @@ def emulator_router(tokens: Tokens) -> APIRouter:
         raw = await request.body()
         if not raw:
             return {}
-        if "json" in request.headers.get("content-type", "") or raw[:1] == b"{":
-            return json.loads(raw)
-        from urllib.parse import parse_qsl
+        try:
+            if "json" in request.headers.get("content-type", "") or raw[:1] == b"{":
+                body = json.loads(raw)
+                return body if isinstance(body, dict) else {}
+            from urllib.parse import parse_qsl
 
-        return dict(parse_qsl(raw.decode()))
+            return dict(parse_qsl(raw.decode()))
+        except ValueError:      # malformed input reads as an empty request, which every call refuses
+            return {}
 
     def session(auth_time: int) -> dict:
         return {"idToken": tokens.id_token(auth_time), "refreshToken": tokens.refresh_token(auth_time),

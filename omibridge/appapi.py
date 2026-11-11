@@ -301,14 +301,21 @@ class AppAPI:
             wanted = {s for s in statuses.split(",") if s}
             items = [c for c in self.all() if not wanted or c["status"] in wanted]
 
-            def when(c):
-                return datetime.fromisoformat((c["started_at"] or c["created_at"]).replace("Z", "+00:00"))
+            def parse(text: str) -> datetime:
+                d = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
-            if start_date:
-                lo = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+            def when(c):
+                return parse(c["started_at"] or c["created_at"])
+
+            try:
+                lo = parse(start_date) if start_date else None
+                hi = parse(end_date) if end_date else None
+            except ValueError:
+                raise HTTPException(400, "bad date")
+            if lo:
                 items = [c for c in items if when(c) >= lo]
-            if end_date:
-                hi = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+            if hi:
                 items = [c for c in items if when(c) <= hi]
             return items[offset: offset + max(0, min(limit, 500))]
 
@@ -525,8 +532,11 @@ class PublicGate:
 
     /app/<secret>/<rest> goes to the app API as /<rest> (constant-time secret check).
     Anything else, including /app/<wrong>/..., goes to the public app unchanged, so a
-    wrong secret gets exactly the 404 an unknown path gets. Failed checks (bad secret,
-    401/403 answers, refused sign-in tokens) count against the client's address.
+    wrong secret gets exactly the 404 an unknown path gets. Failed checks without the
+    secret (a wrong secret, a wrong webhook token, refused sign-in tokens) count against
+    the client's address. A request that carries the right secret is never counted and
+    never blocked: the phone must not be locked out of its own backend, least of all
+    while it is recording, because of a stale token or of someone else on its network.
     """
 
     def __init__(self, public, api, secret: str, limiter: FailureLimiter):
@@ -537,16 +547,9 @@ class PublicGate:
         if scope["type"] not in ("http", "websocket"):
             return await self.public(scope, receive, send)
         ip = client_ip(scope)
-        if self.limiter.blocked(ip):
-            if scope["type"] == "http":
-                await send({"type": "http.response.start", "status": 429,
-                            "headers": [(b"content-type", b"text/plain")]})
-                await send({"type": "http.response.body", "body": b"Too many failed attempts"})
-            else:
-                await send({"type": "websocket.close", "code": 1008})
-            return
         path = scope["path"]
         target = self.public
+        wrong_secret = False
         if path.startswith("/app/"):
             seg, _, tail = path[5:].partition("/")
             if hmac.compare_digest(seg.encode(), self.secret):
@@ -554,7 +557,18 @@ class PublicGate:
                 scope = dict(scope, path=tail, raw_path=tail.encode(), root_path="")
                 target = self.api
             else:
-                self.limiter.fail(ip)
+                wrong_secret = True
+        trusted = target is self.api
+        if not trusted and self.limiter.blocked(ip):
+            if scope["type"] == "http":
+                await send({"type": "http.response.start", "status": 429,
+                            "headers": [(b"content-type", b"text/plain")]})
+                await send({"type": "http.response.body", "body": b"Too many failed attempts"})
+            else:
+                await send({"type": "websocket.close", "code": 1008})
+            return
+        if wrong_secret:
+            self.limiter.fail(ip)
         inner_path = scope["path"]
 
         if scope["type"] == "http":
@@ -581,9 +595,9 @@ class PublicGate:
             async def watching_send(msg):
                 if msg["type"] == "http.response.start":
                     st = msg["status"]
-                    if st in (401, 403) or (emulator and st == 400):
+                    if not trusted and (st in (401, 403) or (emulator and st == 400)):
                         self.limiter.fail(ip)
-                    if target is self.api or emulator:
+                    if trusted or emulator:
                         # One line per app request; the secret is already stripped from the path.
                         log.info("app %s %s -> %d", scope["method"], inner_path, st)
                 await send(msg)
@@ -591,9 +605,7 @@ class PublicGate:
             return await target(scope, capped_receive, watching_send)
 
         async def watching_ws_send(msg):
-            if msg["type"] == "websocket.close" and msg.get("code") == 1008:
-                self.limiter.fail(ip)
-            if msg["type"] in ("websocket.accept", "websocket.close") and target is self.api:
+            if msg["type"] in ("websocket.accept", "websocket.close") and trusted:
                 log.info("app websocket %s %s", inner_path, msg["type"].split(".")[1])
             await send(msg)
 

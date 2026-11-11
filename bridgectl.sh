@@ -28,6 +28,7 @@ case "${1:-status}" in
     done
     printf 'local health:  '; curl -s -m 5 http://127.0.0.1:8378/health || echo "unreachable"; echo
     printf 'public, wrong token (expect 403): '; curl -s -m 10 -o /dev/null -w '%{http_code}\n' -X POST "https://$HOST/omi/audio/wrong-token?uid=t&sample_rate=16000" --data-binary @/dev/null
-    printf 'public / (expect 404): '; curl -s -m 10 -o /dev/null -w '%{http_code}\n' "https://$HOST/"
+    printf 'public / (expect 404, or 200 when the app API is on): '; curl -s -m 10 -o /dev/null -w '%{http_code}\n' "https://$HOST/"
+    printf 'public app API, wrong secret (expect 404): '; curl -s -m 10 -o /dev/null -w '%{http_code}\n' "https://$HOST/app/wrong-secret/v1/health"
     printf 'public /api/conversations (expect 404): '; curl -s -m 10 -o /dev/null -w '%{http_code}\n' "https://$HOST/api/conversations" ;;
 esac
