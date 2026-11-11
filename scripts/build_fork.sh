@@ -90,7 +90,8 @@ dart run build_runner build --delete-conflicting-outputs >/dev/null
 else
   cd "$FORK/app"
 fi
-DEFINES=(--dart-define=OMI_API_BASE_URL="$OMI_BUILD_API"
+DEFINES=(--dart-define=OMIOMY=true
+         --dart-define=OMI_API_BASE_URL="$OMI_BUILD_API"
          --dart-define=OMI_FIREBASE_AUTH_EMULATOR_HOST="$HOST"
          --dart-define=OMI_FIREBASE_AUTH_EMULATOR_PORT="$PORT")
 [[ -n $PUBLIC_HOST ]] && DEFINES+=(--dart-define=OMI_DEV_PUBLIC_API_HOST="$PUBLIC_HOST")
@@ -98,7 +99,8 @@ TARGET=()
 if [[ -n ${OMI_FORK_AUTOPILOT:-} ]]; then
   # Test build: the autopilot entry point taps through the app by itself (see app-fork/tests/).
   cp "$HERE"/app-fork/tests/omi_omy_autopilot.dart integration_test/
-  TARGET=(-t integration_test/omi_omy_autopilot.dart --dart-define=OMIOMY_EXPECT_TITLE="${OMIOMY_EXPECT_TITLE:-}")
+  TARGET=(-t integration_test/omi_omy_autopilot.dart --dart-define=OMIOMY_EXPECT_TITLE="${OMIOMY_EXPECT_TITLE:-}"
+          --dart-define=OMIOMY_EXPECT_DETAIL="${OMIOMY_EXPECT_DETAIL:-}")
 fi
 flutter build ios --simulator --debug --flavor dev -d "$DEVICE" "${DEFINES[@]}" "${TARGET[@]}" 2>&1 | grep -v -F "$SECRET"
 echo "$FORK/app/build/ios/iphonesimulator/Runner.app"

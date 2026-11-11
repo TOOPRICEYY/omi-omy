@@ -271,7 +271,7 @@ class AppAPI:
             except PermissionError as e:
                 raise HTTPException(401, str(e))
 
-        @app.get("/v1/health")
+        @app.api_route("/v1/health", methods=["GET", "HEAD"])   # the app's connectivity probe uses HEAD
         def health():
             return {"status": "ok"}
 
@@ -459,7 +459,7 @@ class AppAPI:
                 self.sockets.get(key, set()).discard(entry)
                 log.info("listen socket closed")
 
-        @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+        @app.api_route("/{path:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"])
         def everything_else(path: str):
             # Memories, chat, apps, subscriptions ...: switched off. 404 reads as "none" in the app.
             raise HTTPException(404, "not available on this backend")
@@ -583,6 +583,9 @@ class PublicGate:
                     st = msg["status"]
                     if st in (401, 403) or (emulator and st == 400):
                         self.limiter.fail(ip)
+                    if target is self.api or emulator:
+                        # One line per app request; the secret is already stripped from the path.
+                        log.info("app %s %s -> %d", scope["method"], inner_path, st)
                 await send(msg)
 
             return await target(scope, capped_receive, watching_send)
@@ -590,6 +593,8 @@ class PublicGate:
         async def watching_ws_send(msg):
             if msg["type"] == "websocket.close" and msg.get("code") == 1008:
                 self.limiter.fail(ip)
+            if msg["type"] in ("websocket.accept", "websocket.close") and target is self.api:
+                log.info("app websocket %s %s", inner_path, msg["type"].split(".")[1])
             await send(msg)
 
         return await target(scope, receive, watching_ws_send)

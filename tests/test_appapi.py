@@ -289,6 +289,8 @@ def test_api_needs_secret_and_token(env):
     assert client.get("/app/nope/v1/conversations", headers=auth(idt)).status_code == 404
     assert client.get(f"{P}/v1/conversations").status_code == 401                      # secret, no token
     assert client.get(f"{P}/v1/conversations", headers=auth(idt)).status_code == 200
+    assert client.head(f"{P}/v1/health").status_code == 200                           # connectivity probe
+    assert client.head(f"{P}/v9/unknown").status_code == 404
     assert client.post("/omi/audio/wrong?uid=x&sample_rate=16000", content=b"").status_code == 403   # webhook kept
 
 

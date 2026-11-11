@@ -1,0 +1,136 @@
+diff --git a/app/lib/backend/preferences.dart b/app/lib/backend/preferences.dart
+index 5f39738db..8b375ba05 100644
+--- a/app/lib/backend/preferences.dart
++++ b/app/lib/backend/preferences.dart
+@@ -29,6 +29,7 @@ import 'package:omi/utils/logger.dart';
+ import 'package:omi/utils/off_ui_isolate.dart';
+ import 'package:omi/utils/conversation_cache_decode.dart';
+ import 'package:omi/env/physical_qualification.dart';
++import 'package:omi/omiomy.dart';
+ 
+ part 'preferences_memory_deletes.dart';
+ 
+@@ -939,7 +940,8 @@ class SharedPreferencesUtil {
+ 
+   set permissionsCompleted(bool value) => saveBool('permissionsCompleted', value);
+ 
+-  bool get aiConsentGiven => getBool('aiConsentGiven');
++  // omi-omy: the bridge is the user's own server; Omi's AI-vendor consent screen does not apply.
++  bool get aiConsentGiven => omiomyBuild || getBool('aiConsentGiven');
+ 
+   set aiConsentGiven(bool value) => saveBool('aiConsentGiven', value);
+ 
+diff --git a/app/lib/omiomy.dart b/app/lib/omiomy.dart
+new file mode 100644
+index 000000000..9e8303415
+--- /dev/null
++++ b/app/lib/omiomy.dart
+@@ -0,0 +1,5 @@
++// omi-omy build switch (applied by ~/omi-omy/app-fork/patches). True only in builds made
++// by omi-omy's scripts/build_fork.sh, which passes --dart-define=OMIOMY=true. The app then
++// runs as a transcribe-and-summarize app against the omi-omy bridge, and the entry points
++// to features that backend does not serve are hidden.
++const bool omiomyBuild = bool.fromEnvironment('OMIOMY');
+diff --git a/app/lib/pages/home/page.dart b/app/lib/pages/home/page.dart
+index 2a38c9f68..54e4396f3 100644
+--- a/app/lib/pages/home/page.dart
++++ b/app/lib/pages/home/page.dart
+@@ -85,6 +85,7 @@ import 'home_deep_links.dart';
+ import 'home_navigation.dart';
+ import 'home_prompt_gate.dart';
+ import 'widgets/battery_info_widget.dart';
++import 'package:omi/omiomy.dart';
+ 
+ class HomePageWrapper extends StatefulWidget {
+   final String? navigateToRoute;
+@@ -879,6 +880,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
+                     children: [
+                       Column(
+                         children: [
++                          if (!omiomyBuild) // omi-omy: no Tasks tab
+                           HomeTabSwitcher(
+                             trailing: onHome ? null : _buildTasksActions(context),
+                             onTabTap: (index, isRepeat) {
+@@ -940,7 +942,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
+                                 bottom: homeChatBarOffset(context),
+                                 child: Row(
+                                   children: [
+-                                    Expanded(child: _buildChatBar(context)),
++                                    // omi-omy: no chat; keep the record button.
++                                    Expanded(child: omiomyBuild ? const SizedBox.shrink() : _buildChatBar(context)),
+                                     const SizedBox(width: 10),
+                                     const HomeRecordButton(),
+                                   ],
+diff --git a/app/lib/pages/settings/settings_drawer.dart b/app/lib/pages/settings/settings_drawer.dart
+index 1aa2fab8c..40f5e330d 100644
+--- a/app/lib/pages/settings/settings_drawer.dart
++++ b/app/lib/pages/settings/settings_drawer.dart
+@@ -13,6 +13,7 @@ import 'package:omi/providers/device_provider.dart';
+ import 'package:omi/ui/ui.dart';
+ import 'package:omi/utils/l10n_extensions.dart';
+ import 'package:omi/utils/platform/platform_service.dart';
++import 'package:omi/omiomy.dart';
+ 
+ /// The Settings sheet: Account, then eight groups (Device, Recording & Transcription, Voice,
+ /// Notifications & Display, Integrations, Privacy & Data, Help & About, Developer Settings), plus
+@@ -95,6 +96,15 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
+     String? value,
+     Widget? tag,
+   }) {
++    // omi-omy: no rows for features the bridge does not serve.
++    if (omiomyBuild &&
++        const {
++          SettingsDestination.upgrade, SettingsDestination.planAndUsage, SettingsDestination.referral,
++          SettingsDestination.voice, SettingsDestination.integrations, SettingsDestination.connectAgent,
++          SettingsDestination.memories, SettingsDestination.goals,
++        }.contains(destination)) {
++      return const SizedBox.shrink();
++    }
+     return OmiSettingsRow(
+       key: ValueKey(key),
+       leading: FaIcon(icon),
+diff --git a/app/lib/services/app_review_service.dart b/app/lib/services/app_review_service.dart
+index 8a01465d7..3cd40f6bc 100644
+--- a/app/lib/services/app_review_service.dart
++++ b/app/lib/services/app_review_service.dart
+@@ -1,4 +1,5 @@
+ import 'dart:async';
++import 'package:omi/omiomy.dart';
+ import 'dart:convert';
+ import 'dart:io';
+ 
+@@ -108,7 +109,7 @@ class AppReviewService {
+   /// checks permit it. The lifecycle guard is checked before and after the
+   /// asynchronous native availability query.
+   Future<void> requestReview({required AppReviewMoment moment, required bool Function() isStillAppropriate}) =>
+-      _enqueue<void>(() => _requestReviewSerialized(moment, isStillAppropriate));
++      omiomyBuild ? Future<void>.value() : _enqueue<void>(() => _requestReviewSerialized(moment, isStillAppropriate));
+ 
+   Future<void> _requestReviewSerialized(AppReviewMoment moment, bool Function() isStillAppropriate) async {
+     final momentName = moment.telemetryName;
+diff --git a/app/lib/widgets/conversation_bottom_bar.dart b/app/lib/widgets/conversation_bottom_bar.dart
+index fcdca3f14..fb94294bc 100644
+--- a/app/lib/widgets/conversation_bottom_bar.dart
++++ b/app/lib/widgets/conversation_bottom_bar.dart
+@@ -1,4 +1,5 @@
+ import 'dart:async';
++import 'package:omi/omiomy.dart';
+ import 'dart:math' as math;
+ 
+ import 'package:omi/utils/platform/platform_manager.dart';
+@@ -947,6 +948,7 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
+ 
+   /// "Ask Omi", centred in a full-width 56 pt capsule.
+   Widget _buildAskBar(BuildContext context) {
++    if (omiomyBuild) return const SizedBox.shrink(); // omi-omy: no chat
+     final label = context.l10n.askOmi;
+     return Semantics(
+       button: true,
+@@ -970,6 +972,7 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
+ 
+   /// The round Ask button beside the player: a 56 pt circle in the primary ink, as tall as the bar.
+   Widget _buildAskButton(BuildContext context) {
++    if (omiomyBuild) return const SizedBox.shrink(); // omi-omy: no chat
+     final label = context.l10n.askOmi;
+     return Tooltip(
+       message: label,
