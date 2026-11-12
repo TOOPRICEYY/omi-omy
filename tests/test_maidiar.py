@@ -168,3 +168,31 @@ def test_local_mode_does_not_ask_mai_for_speakers(tmp_path, monkeypatch):
     e = engine(tmp_path, FakeTranscriber(words_for(truth, lambda who, p: 0)))
     run(e, x)
     assert e.transcriber.calls == [False] and e.diarizer.used == 1
+
+
+def test_transcriber_retries_rate_limits(monkeypatch):
+    import io
+    import requests
+    import soundfile as sf
+    from attrib.transcribe import OpenRouterTranscriber
+
+    class R:
+        def __init__(self, code, body=None):
+            self.status_code, self.headers, self._b = code, {}, body or {}
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(str(self.status_code))
+
+        def json(self):
+            return self._b
+
+    replies = [R(429), R(503), R(200, {"words": [{"word": "hi", "start": 0.1, "end": 0.3, "speaker": 1}]})]
+    monkeypatch.setattr(requests, "post", lambda *a, **k: replies.pop(0))
+    t = OpenRouterTranscriber(key="k")
+    waits = []
+    t.sleep = waits.append
+    buf = io.BytesIO()
+    sf.write(buf, np.zeros(SR, np.float32), SR, format="WAV")
+    words = t(buf.getvalue(), diarize=True)
+    assert [(w.text, w.speaker) for w in words] == [("hi", "p0:1")] and waits == [5.0, 15.0]

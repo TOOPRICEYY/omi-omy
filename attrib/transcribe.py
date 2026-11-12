@@ -18,6 +18,7 @@ from .types import Word
 
 BASE_URL = "https://openrouter.ai/api/v1"
 MODEL = "microsoft/mai-transcribe-2"
+RETRY_STATUS = {429, 500, 502, 503, 504}
 
 
 def parse_response(body: dict, offset: float = 0.0, piece: int | None = None) -> list[Word]:
@@ -59,6 +60,8 @@ class OpenRouterTranscriber:
         self.timeout = timeout
         self.max_piece_s = max_piece_s
         self.seconds_billed = 0.0
+        self.backoff = (5.0, 15.0, 30.0, 60.0, 120.0)
+        self.sleep = __import__("time").sleep
 
     def __call__(self, wav_bytes: bytes, phrases: list[str] | None = None, diarize: bool = False) -> list[Word]:
         x, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32")
@@ -81,10 +84,19 @@ class OpenRouterTranscriber:
         if phrases:
             # Names of enrolled people, so they are spelled right.
             data.append(("prompt", ", ".join(phrases)))
-        r = requests.post(f"{self.base_url}/audio/transcriptions",
-                          headers={"Authorization": f"Bearer {self.key}"},
-                          data=data, files={"file": ("audio.flac", buf.getvalue(), "audio/flac")},
-                          timeout=(30, self.timeout))
+        for attempt in range(len(self.backoff) + 1):
+            r = requests.post(f"{self.base_url}/audio/transcriptions",
+                              headers={"Authorization": f"Bearer {self.key}"},
+                              data=data, files={"file": ("audio.flac", buf.getvalue(), "audio/flac")},
+                              timeout=(30, self.timeout))
+            if r.status_code not in RETRY_STATUS or attempt == len(self.backoff):
+                break
+            # Rate limited or the provider hiccuped: wait (as told, within reason) and try again.
+            try:
+                wait = min(float(r.headers.get("Retry-After", "")), 120.0)
+            except ValueError:
+                wait = self.backoff[attempt]
+            self.sleep(max(wait, 1.0))
         r.raise_for_status()
         body = r.json()
         self.seconds_billed += float((body.get("usage") or {}).get("seconds") or len(x) / sr)
