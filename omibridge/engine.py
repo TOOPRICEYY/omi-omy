@@ -43,6 +43,11 @@ class Engine:
         self.diarizer = ChunkDiarizer(str(cfg.models_dir / SEGMENTATION[cfg.segmentation]), self.embedder,
                                       threshold=cfg.cluster_threshold,
                                       seg_meta=KNOWN_META.get(cfg.segmentation))
+        if cfg.segmentation == "diarizen" and cfg.diarizer_device != "cpu":
+            from .gpu_segmentation import maybe_gpu
+
+            self.diarizer.seg = maybe_gpu(self.diarizer.seg, cfg.diarizer_device, cfg.diarizer_batch,
+                                          cfg.diarizen_checkpoint or None)
         self.cohort = np.load(COHORT)
         self.gallery = Gallery.load(str(cfg.gallery_path)) if cfg.gallery_path.exists() else Gallery()
         self.transcriber = transcriber
@@ -85,6 +90,9 @@ class Engine:
             packed, tmap = pack(x, regions)
             raw = self.diarizer.turns(packed) if len(packed) else []
             clusters = self.diarizer.clusters(packed, raw) if raw else []
+            release = getattr(self.diarizer.seg, "release", None)
+            if release:
+                release()   # GPU memory back after each conversation
         turns = [Turn(tmap.to_orig(t.start), tmap.to_orig(t.end), t.speaker) for t in raw]
         words: list[Word] = []
         error = None

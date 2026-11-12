@@ -53,6 +53,11 @@ class Config:
     min_speech_seconds: float = field(default_factory=lambda: _f("OMIBRIDGE_MIN_SPEECH_SECONDS", 8))
 
     segmentation: str = field(default_factory=lambda: os.environ.get("OMIBRIDGE_SEGMENTATION", "diarizen"))
+    # "mps": DiariZen's PyTorch model on the Mac's GPU (needs requirements-gpu.txt; falls back
+    # to the ONNX model on the CPU when unavailable). Only applies to the diarizen segmentation.
+    diarizer_device: str = field(default_factory=lambda: os.environ.get("OMIBRIDGE_DIARIZER_DEVICE", "cpu"))
+    diarizer_batch: int = field(default_factory=lambda: int(os.environ.get("OMIBRIDGE_DIARIZER_BATCH", "4")))
+    diarizen_checkpoint: str = field(default_factory=lambda: os.environ.get("OMIBRIDGE_DIARIZEN_CHECKPOINT", ""))
     # 0.5 over-splits a little; naming re-joins known people. 0.6 scored the same on
     # AMI but sometimes fuses two similar voices, which cannot be undone later.
     cluster_threshold: float = field(default_factory=lambda: _f("OMIBRIDGE_CLUSTER_THRESHOLD", 0.5))

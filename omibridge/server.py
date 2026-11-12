@@ -168,7 +168,7 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
     def health():
         return {"ok": True, "recording": [s.uid for s in sessions.sessions.values()],
                 "queued": jobs.qsize(), **status, "people": len(engine.gallery.people),
-                "transcription": engine.transcriber is not None, "summaries": engine.summarizer is not None, "omi_writeback": bool(cfg.omi_writeback and cfg.omi_api_key)}
+                "transcription": engine.transcriber is not None, "diarizer": getattr(getattr(getattr(engine, "diarizer", None), "seg", None), "device_name", "cpu"), "summaries": engine.summarizer is not None, "omi_writeback": bool(cfg.omi_writeback and cfg.omi_api_key)}
 
     @app.get("/", response_class=HTMLResponse)
     def index():

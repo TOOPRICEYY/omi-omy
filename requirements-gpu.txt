@@ -1,0 +1,12 @@
+# Optional: DiariZen's speaker segmentation on the Mac's GPU (OMIBRIDGE_DIARIZER_DEVICE=mps).
+# Install into the bridge's venv only when switching it on:
+#   uv pip install --python .venv/bin/python -r requirements-gpu.txt
+# DiariZen's model weights are CC-BY-NC-4.0 (personal use), the same as the ONNX export.
+diarizen @ git+https://github.com/BUTSpeechFIT/DiariZen@844f5555b0a98acd0931511fc641a8c5b8ba92c7
+pyannote.audio @ git+https://github.com/BUTSpeechFIT/DiariZen@844f5555b0a98acd0931511fc641a8c5b8ba92c7#subdirectory=pyannote-audio
+huggingface_hub
+toml
+psutil
+accelerate
+einops
+setuptools<70   # the bundled pyannote still imports pkg_resources

@@ -137,3 +137,41 @@ def test_summary_text_and_cleaning():
                  "action_items": ["send the sheet", " ", None]})
     assert out == {"title": "Budget review", "overview": "ok", "emoji": "📊", "category": "other",
                    "action_items": ["send the sheet"]}
+
+
+# -- optional GPU segmentation: fails safe -------------------------------------------
+class _FakeOnnxSeg:
+    window = 16
+    def scores(self, chunks):
+        return np.zeros((len(chunks), 3, 2), np.float32)
+    def binarize(self, y, speech_bias=0.0):
+        return y.argmax(-1)
+
+
+def test_gpu_off_by_default_and_fallbacks():
+    from omibridge.gpu_segmentation import maybe_gpu
+
+    onnx = _FakeOnnxSeg()
+    assert maybe_gpu(onnx, "cpu") is onnx                                   # default: untouched
+    def missing(_):
+        raise ImportError("No module named 'diarizen'")
+    assert maybe_gpu(onnx, "mps", loader=missing) is onnx                   # packages missing -> CPU
+
+
+def test_gpu_wrapper_batches_and_falls_back_on_error():
+    torch = pytest.importorskip("torch")
+    from omibridge.gpu_segmentation import MpsSegmentation
+
+    class Net(torch.nn.Module):
+        def forward(self, x):                      # (B, 1, W) -> (B, 3, 2)
+            return torch.ones(x.shape[0], 3, 2) * x.mean()
+    seg = MpsSegmentation(_FakeOnnxSeg(), Net(), device="cpu", batch=2)
+    out = seg.scores(np.ones((5, 16), np.float32))
+    assert out.shape == (5, 3, 2) and np.allclose(out, 1.0)               # 3 batches of <= 2
+    assert seg.window == 16 and seg.device_name == "cpu"                  # delegated to the ONNX model
+    class Broken(torch.nn.Module):
+        def forward(self, x):
+            raise RuntimeError("MPS out of memory")
+    seg = MpsSegmentation(_FakeOnnxSeg(), Broken(), device="cpu")
+    assert np.all(seg.scores(np.ones((2, 16), np.float32)) == 0)           # ONNX answer instead
+    assert seg.failed and seg.device_name == "cpu (GPU failed)"

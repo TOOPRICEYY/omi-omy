@@ -76,6 +76,15 @@ and use "Import a recording" on the review page (`POST /api/import` on the
 private port). Recordings longer than `OMIBRIDGE_MAX_MINUTES` are cut at quiet
 points into several conversations.
 
+Optional GPU speaker segmentation (Apple Silicon): `OMIBRIDGE_DIARIZER_DEVICE=mps` runs
+DiariZen's original PyTorch model (pinned in `omibridge/gpu_segmentation.py`) on the GPU instead
+of the ONNX file on the CPU. Install `requirements-gpu.txt` first (it moves PyTorch to the version
+DiariZen's pyannote needs). Measured on an M1 Mac mini: segmentation windows about 2x faster, the
+whole speaker step about 1.5x, identical speakers (one turn boundary moved by 0.02 s in 29). GPU
+memory: about 1.2 GB with `OMIBRIDGE_DIARIZER_BATCH=1` (0.55 s per 16 s window), 3.3 GB with 4
+(0.44 s), 6.7 GB peak with 8 (no faster). If anything about the GPU path fails, the bridge logs it
+and uses the CPU. `/health` shows which one is in use (`diarizer`).
+
 Data stays in `data/bridge/`: `conversations/<id>/` holds `audio.flac`,
 `conversation.json` (speakers and transcript lines) and the voiceprints needed
 to rename speakers later; `gallery.npz` holds the enrolled people.
