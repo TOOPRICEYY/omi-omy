@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import pickle
 import threading
 import time
@@ -16,7 +17,8 @@ from attrib.align import assign_words
 from attrib.audio import SR, resample
 from attrib.chunkdiar import KNOWN_META, ChunkDiarizer
 from attrib.embed import Embedder
-from attrib.identify import Gallery, Identifier, IdentifyConfig, final_labels, is_unknown
+from attrib.identify import UNKNOWN, Gallery, Identifier, IdentifyConfig, Match, final_labels, is_unknown
+from attrib.maidiar import mai_clusters
 from attrib.types import Turn, Word
 from attrib.vad import SileroVAD, pack
 
@@ -29,6 +31,7 @@ SEGMENTATION = {
 EMBEDDING = "nemo_en_titanet_large.onnx"
 COHORT = Path(__file__).with_name("cohort_titanet.npy")
 MAX_SAMPLES_PER_LABEL = 6  # voiceprints added to a person from one conversation
+log = logging.getLogger("omibridge.engine")
 
 
 class Engine:
@@ -71,7 +74,11 @@ class Engine:
         holds names the user set by hand; they always win."""
         pinned = pinned or {}
         free = [c for c in clusters if c.label not in pinned]
-        matches = self._identifier().identify(free)
+        # MAI speakers with too little clear speech for a trustworthy voiceprint stay unnamed.
+        short = [c for c in free if getattr(c, "clean_time", None) is not None
+                 and c.clean_time < self.cfg.min_name_seconds]
+        matches = self._identifier().identify([c for c in free if c not in short])
+        matches |= {c.label: Match(UNKNOWN, 0.0, 0.0, 0.0) for c in short}
         names = final_labels(free, matches)
         conf = {c.label: matches[c.label].confidence for c in free}
         for label, person in pinned.items():
@@ -85,30 +92,43 @@ class Engine:
         cid = meta["id"]
         out = self.cfg.conv_dir / cid
         out.mkdir(parents=True, exist_ok=True)
+        words: list[Word] = []
+        error, mode = None, None
         with self.lock:
             regions = self.vad(x)
             packed, tmap = pack(x, regions)
-            raw = self.diarizer.turns(packed) if len(packed) else []
-            clusters = self.diarizer.clusters(packed, raw) if raw else []
-            release = getattr(self.diarizer.seg, "release", None)
-            if release:
-                release()   # GPU memory back after each conversation
+            use_mai = self.cfg.diarizer == "mai" and self.transcriber is not None
+            heard: list[Word] = []
+            if self.transcriber is not None and len(packed):
+                buf = io.BytesIO()
+                sf.write(buf, packed, SR, format="WAV", subtype="PCM_16")
+                phrases = list(self.gallery.people)
+                try:
+                    heard = (self.transcriber(buf.getvalue(), phrases, diarize=True) if use_mai
+                             else self.transcriber(buf.getvalue(), phrases))
+                except Exception as e:  # keep the diarization even if the transcript failed
+                    error = f"transcription failed: {e}"
+            raw, clusters = [], []
+            if use_mai and any(w.speaker is not None for w in heard):
+                raw, clusters = mai_clusters(packed, heard, self.embedder)
+                mode = "mai"
+            elif len(packed):
+                if use_mai:
+                    log.warning("%s: no speaker labels from MAI (%s); diarizing locally", cid,
+                                error or "none returned")
+                raw = self.diarizer.turns(packed)
+                clusters = self.diarizer.clusters(packed, raw) if raw else []
+                release = getattr(self.diarizer.seg, "release", None)
+                if release:
+                    release()   # GPU memory back after each conversation
+                mode = "local"
         turns = [Turn(tmap.to_orig(t.start), tmap.to_orig(t.end), t.speaker) for t in raw]
-        words: list[Word] = []
-        error = None
-        if self.transcriber is not None and len(packed):
-            buf = io.BytesIO()
-            sf.write(buf, packed, SR, format="WAV", subtype="PCM_16")
-            try:
-                words = [Word(w.text, tmap.to_orig(w.start), tmap.to_orig(w.end))
-                         for w in self.transcriber(buf.getvalue(), list(self.gallery.people))]
-            except Exception as e:  # keep the diarization even if the transcript failed
-                error = f"transcription failed: {e}"
+        words = [Word(w.text, tmap.to_orig(w.start), tmap.to_orig(w.end)) for w in heard]
         sf.write(out / "audio.flac", x, SR, format="FLAC", subtype="PCM_16")
         with open(out / "state.pkl", "wb") as f:
             pickle.dump({"turns": turns, "words": words, "clusters": clusters, "pinned": {}}, f)
         meta = dict(meta) | {"duration": len(x) / SR, "speech_seconds": sum(r.duration for r in regions),
-                             "error": error}
+                             "error": error, "diarizer": mode}
         (out / "meta.json").write_text(json.dumps(meta))
         return self.render(cid)
 

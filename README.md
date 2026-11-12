@@ -19,7 +19,8 @@ pendant energy gate -> phone Silero VAD -> pack speech -> MAI Transcribe 2 (no d
 | `attrib/vad.py` | `EnergyGate` (cheap pendant gate), `SileroVAD` (phone), `pack` + `TimeMap` (speech-only upload, timestamps mapped back) |
 | `attrib/transcribe.py` | MAI Transcribe 2 client (OpenRouter), word timestamps, long audio cut at quiet points |
 | `omibridge/` | Service for the Omi app: audio webhook, conversation cutting, review page, voice naming |
-| `attrib/chunkdiar.py` | Diarizer: 10 s segmentation windows, one TitaNet voiceprint per window speaker, clustering with "same window = different people" constraints |
+| `attrib/maidiar.py` | Who spoke when from MAI Transcribe 2's diarization (the bridge's default): words to turns, voiceprints from each speaker's clearest speech, speakers linked across upload pieces |
+| `attrib/chunkdiar.py` | Local diarizer (fallback, `OMIBRIDGE_DIARIZER=local`): 10 s segmentation windows, one TitaNet voiceprint per window speaker, clustering with "same window = different people" constraints |
 | `attrib/diarize.py` | sherpa-onnx diarizer (baseline) and per-speaker voiceprint pooling |
 | `attrib/identify.py` | Gallery, per-sample adaptive s-norm, calendar priors, open-set threshold, unknown-voice tracking |
 | `attrib/align.py` | Words to speakers by timestamp overlap |
@@ -46,8 +47,8 @@ The transcription client reads `OPENROUTER_API_KEY` and calls
 Runs next to the stock Omi app, no fork needed. The app's developer setting
 "Realtime audio bytes" posts the pendant's raw audio to the bridge. The bridge
 cuts it into conversations (closed after 2 minutes without speech), transcribes
-with MAI Transcribe 2 through OpenRouter, diarizes with DiariZen + TitaNet, and
-names the speakers it knows, and writes a short summary (title, overview, action
+with MAI Transcribe 2 through OpenRouter (which also says who spoke when), and
+names the speakers it knows from TitaNet voiceprints of their clearest speech, and writes a short summary (title, overview, action
 items) with an LLM through the same OpenRouter key. A local review page lists conversations, plays a
 clip of each unknown voice, and lets you name it. Naming a voice adds it to the
 gallery, so later conversations recognize that person.
@@ -76,14 +77,27 @@ and use "Import a recording" on the review page (`POST /api/import` on the
 private port). Recordings longer than `OMIBRIDGE_MAX_MINUTES` are cut at quiet
 points into several conversations.
 
-Optional GPU speaker segmentation (Apple Silicon): `OMIBRIDGE_DIARIZER_DEVICE=mps` runs
+Who spoke when (`OMIBRIDGE_DIARIZER`, default `mai`): MAI Transcribe 2 returns a speaker label per
+word (`diarize=true`, no extra cost). Labels hold only within one upload, and recordings with more
+than 10 minutes of speech go up in pieces, so each piece-local speaker gets a voiceprint from its
+clearest speech (turns of 1.5 s or more, 0.2 s trimmed off each edge, up to 30 s) and the pieces
+are linked by clustering those voiceprints, never joining two speakers of one piece. The same
+voiceprints are matched against the gallery; a speaker with less than `OMIBRIDGE_MIN_NAME_SECONDS`
+(3 s) of clear speech stays unnamed. If MAI fails or returns no labels, that conversation is
+diarized locally (below) and the log says so; `meta.json` records which path ran (`diarizer`),
+and `/health` shows the mode. On 3 AMI meetings (2026-11-12) this credited 2.6% of words to the
+wrong person, against 18-22% for the local diarizer. Putting known people's clips at the start
+of the upload so MAI labels them itself did not work (27-55% wrong): MAI often gives several
+prefix voices one label.
+
+`OMIBRIDGE_DIARIZER=local`, or the fallback: optional GPU speaker segmentation (Apple Silicon): `OMIBRIDGE_DIARIZER_DEVICE=mps` runs
 DiariZen's original PyTorch model (pinned in `omibridge/gpu_segmentation.py`) on the GPU instead
 of the ONNX file on the CPU. Install `requirements-gpu.txt` first (it moves PyTorch to the version
 DiariZen's pyannote needs). Measured on an M1 Mac mini: segmentation windows about 2x faster, the
 whole speaker step about 1.5x, identical speakers (one turn boundary moved by 0.02 s in 29). GPU
 memory: about 1.2 GB with `OMIBRIDGE_DIARIZER_BATCH=1` (0.55 s per 16 s window), 3.3 GB with 4
 (0.44 s), 6.7 GB peak with 8 (no faster). If anything about the GPU path fails, the bridge logs it
-and uses the CPU. `/health` shows which one is in use (`diarizer`).
+and uses the CPU. `/health` shows which one is in use (`local_diarizer`).
 
 Data stays in `data/bridge/`: `conversations/<id>/` holds `audio.flac`,
 `conversation.json` (speakers and transcript lines) and the voiceprints needed

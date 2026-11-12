@@ -1,8 +1,9 @@
 """MAI Transcribe 2 client, through OpenRouter's OpenAI-compatible audio API.
 
-Speaker labels are not requested: we diarize locally. Long recordings are cut
-into pieces at quiet points so each upload stays small, and word times are
-shifted back onto the full recording.
+With diarize=True MAI also says who spoke when; its labels only hold within one
+request, so each word's speaker is "p<piece>:<label>" (see attrib.maidiar).
+Long recordings are cut into pieces at quiet points so each upload stays small,
+and word times are shifted back onto the full recording.
 """
 from __future__ import annotations
 
@@ -19,8 +20,12 @@ BASE_URL = "https://openrouter.ai/api/v1"
 MODEL = "microsoft/mai-transcribe-2"
 
 
-def parse_response(body: dict, offset: float = 0.0) -> list[Word]:
-    words = [Word(w["word"], offset + w["start"], offset + w["end"]) for w in body.get("words") or []]
+def parse_response(body: dict, offset: float = 0.0, piece: int | None = None) -> list[Word]:
+    def spk(w):
+        s = w.get("speaker")
+        return None if piece is None or s is None else f"p{piece}:{s}"
+
+    words = [Word(w["word"], offset + w["start"], offset + w["end"], spk(w)) for w in body.get("words") or []]
     if words:
         return words
     # No word timings: spread each segment's text evenly as a fallback.
@@ -55,21 +60,24 @@ class OpenRouterTranscriber:
         self.max_piece_s = max_piece_s
         self.seconds_billed = 0.0
 
-    def __call__(self, wav_bytes: bytes, phrases: list[str] | None = None) -> list[Word]:
+    def __call__(self, wav_bytes: bytes, phrases: list[str] | None = None, diarize: bool = False) -> list[Word]:
         x, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32")
         cuts = split_points(x, self.max_piece_s, sr=sr)
         words: list[Word] = []
-        for a, b in zip(cuts, cuts[1:]):
-            words += self._piece(x[a:b], sr, a / sr, phrases)
+        for k, (a, b) in enumerate(zip(cuts, cuts[1:])):
+            words += self._piece(x[a:b], sr, a / sr, phrases, k if diarize else None)
         return words
 
-    def _piece(self, x: np.ndarray, sr: int, offset: float, phrases: list[str] | None) -> list[Word]:
+    def _piece(self, x: np.ndarray, sr: int, offset: float, phrases: list[str] | None,
+               piece: int | None = None) -> list[Word]:
         import requests
 
         buf = io.BytesIO()
         sf.write(buf, x, sr, format="FLAC", subtype="PCM_16")
         data = [("model", self.model), ("response_format", "verbose_json"),
                 ("timestamp_granularities[]", "word")]
+        if piece is not None:
+            data.append(("diarize", "true"))
         if phrases:
             # Names of enrolled people, so they are spelled right.
             data.append(("prompt", ", ".join(phrases)))
@@ -80,4 +88,4 @@ class OpenRouterTranscriber:
         r.raise_for_status()
         body = r.json()
         self.seconds_billed += float((body.get("usage") or {}).get("seconds") or len(x) / sr)
-        return parse_response(body, offset)
+        return parse_response(body, offset, piece)

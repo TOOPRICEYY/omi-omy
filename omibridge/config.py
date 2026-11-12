@@ -52,6 +52,12 @@ class Config:
     max_minutes: float = field(default_factory=lambda: _f("OMIBRIDGE_MAX_MINUTES", 60))
     min_speech_seconds: float = field(default_factory=lambda: _f("OMIBRIDGE_MIN_SPEECH_SECONDS", 8))
 
+    # Who spoke when: "mai" uses MAI Transcribe 2's diarization (names come from voiceprints
+    # of each speaker's clearest speech); "local" runs DiariZen on this Mac. "mai" falls back
+    # to "local" for a conversation when MAI returns no speaker labels or fails.
+    diarizer: str = field(default_factory=lambda: os.environ.get("OMIBRIDGE_DIARIZER", "mai").strip().lower())
+    # A MAI speaker needs this much clear speech (turns of 1.5 s or more) before it is named.
+    min_name_seconds: float = field(default_factory=lambda: _f("OMIBRIDGE_MIN_NAME_SECONDS", 3.0))
     segmentation: str = field(default_factory=lambda: os.environ.get("OMIBRIDGE_SEGMENTATION", "diarizen"))
     # "mps": DiariZen's PyTorch model on the Mac's GPU (needs requirements-gpu.txt; falls back
     # to the ONNX model on the CPU when unavailable). Only applies to the diarizen segmentation.
