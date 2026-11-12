@@ -19,7 +19,7 @@ from attrib.chunkdiar import KNOWN_META, ChunkDiarizer
 from attrib.embed import Embedder
 from attrib.identify import UNKNOWN, Gallery, Identifier, IdentifyConfig, Match, final_labels, is_unknown
 from attrib.maidiar import mai_clusters
-from attrib.types import Region, Turn, Word
+from attrib.types import Turn, Word
 from attrib.vad import SileroVAD, pack
 
 from .config import Config
@@ -38,7 +38,7 @@ class Engine:
     def __init__(self, cfg: Config, transcriber=None, summarizer=None):
         self.cfg = cfg
         self.lock = threading.Lock()
-        self.vad = SileroVAD(front=cfg.vad_front)
+        self.vad = SileroVAD()
         # The live stream gets its own detector and lock, so the webhook never
         # waits behind a conversation that is being processed.
         self.live_vad, self.live_lock = SileroVAD(), threading.Lock()
@@ -96,9 +96,7 @@ class Engine:
         error, mode = None, None
         with self.lock:
             regions = self.vad(x)
-            # "all": MAI hears the whole conversation (times map 1:1); speech_seconds still from the VAD.
-            sent = [Region(0.0, len(x) / SR)] if self.cfg.mai_audio == "all" and len(x) else regions
-            packed, tmap = pack(x, sent)
+            packed, tmap = pack(x, regions)
             use_mai = self.cfg.diarizer == "mai" and self.transcriber is not None
             heard: list[Word] = []
             if self.transcriber is not None and len(packed):
