@@ -77,6 +77,13 @@ and use "Import a recording" on the review page (`POST /api/import` on the
 private port). Recordings longer than `OMIBRIDGE_MAX_MINUTES` are cut at quiet
 points into several conversations.
 
+What MAI hears (`OMIBRIDGE_MAI_AUDIO`, default `all`): the whole conversation. With `speech`
+only Silero's speech stretches are packed and sent (37% of the audio), but on 18 pendant
+conversations that lost ~40% of the words MAI finds in the whole recording, because rumble from
+clothing hides muffled speech from Silero, and 14% of the remaining words changed speaker.
+`OMIBRIDGE_VAD_FRONT=hp150norm` (150 Hz high-pass plus level) halves that loss at 46% of audio.
+Sending everything costs about $0.10 per hour of conversation audio. Revisit with a cheaper model.
+
 Who spoke when (`OMIBRIDGE_DIARIZER`, default `mai`): MAI Transcribe 2 returns a speaker label per
 word (`diarize=true`, no extra cost). Labels hold only within one upload, and recordings with more
 than 10 minutes of speech go up in pieces, so each piece-local speaker gets a voiceprint from its
