@@ -171,6 +171,12 @@ class AppAPI:
         self.undelivered: dict[str, str] = {}   # session key -> last finished conversation not yet shown
         self.jobs: dict[str, dict] = {}
         self.lock = threading.Lock()
+        self.label_lock = threading.Lock()
+        if not cfg.wearer:
+            try:
+                cfg.wearer = json.loads((cfg.app_dir / "wearer.json").read_text())["name"] or None
+            except (OSError, ValueError, KeyError):
+                pass
         bridge.state.listeners.append(self)
         self.app = self._build()
         # The public port: the webhook, the sign-in emulator calls at the root, and this API
@@ -235,6 +241,101 @@ class AppAPI:
             if not (self.cfg.conv_dir / q.stem / "conversation.json").exists():
                 out.append(processing_stub(q.stem, json.loads(q.read_text())))
         return sorted(out, key=lambda c: c["started_at"] or c["created_at"], reverse=True)
+
+    # -- naming speakers from the app ---------------------------------------------
+    def created_people(self) -> list[str]:
+        try:
+            return list(json.loads((self.cfg.app_dir / "people.json").read_text()))
+        except (OSError, ValueError):
+            return []
+
+    def known_people(self) -> list[str]:
+        names = [p["name"] for p in self.engine.people()] + self.created_people()
+        return [n for n in dict.fromkeys(names) if n != self.cfg.wearer]
+
+    def create_person(self, name: str) -> str:
+        name = " ".join(name.split())[:80]
+        if not name or is_unknown(name.lower()):
+            raise HTTPException(400, "invalid name")
+        with self.label_lock:
+            have = self.created_people()
+            for n in have + [p["name"] for p in self.engine.people()]:
+                if n.lower() == name.lower():
+                    return n
+            self.cfg.app_dir.mkdir(parents=True, exist_ok=True)
+            (self.cfg.app_dir / "people.json").write_text(json.dumps(have + [name]))
+            return name
+
+    def wearer_name(self) -> str:
+        """The name "this is me" files the wearer's voice under: OMIBRIDGE_WEARER, else the
+        app's display name (onboarding), else "Me". Chosen once and kept."""
+        if not self.cfg.wearer:
+            try:
+                name = json.loads((self.cfg.app_dir / "profile.json").read_text()).get("displayName") or ""
+            except (OSError, ValueError):
+                name = ""
+            self.cfg.wearer = " ".join(name.split())[:80] or "Me"
+            self.cfg.app_dir.mkdir(parents=True, exist_ok=True)
+            (self.cfg.app_dir / "wearer.json").write_text(json.dumps({"name": self.cfg.wearer}))
+        return self.cfg.wearer
+
+    def assign(self, cid: str, assign_type: str, value: str | None, speaker_id: int | None = None,
+               segment_ids: list[str] | None = None, segment_index: int | None = None) -> dict:
+        """Omi's manual speaker assignment, mapped onto the bridge's labeling. The bridge names
+        whole voices, so every line of a chosen line's voice gets the name, and the voice is
+        learned (the gallery gets its voiceprints) so later conversations recognize it."""
+        if assign_type not in ("is_user", "person_id", "not_a_person"):
+            raise HTTPException(400, "Invalid assign type")
+        p = self.conv_dir(cid)
+        if p is None:
+            raise HTTPException(404, "no such conversation")
+        value = None if value in (None, "null", "") else value
+        doc = json.loads((p / "conversation.json").read_text())
+        order = [s["name"] for s in doc.get("speakers", [])]
+        segs = doc.get("segments", [])
+        voices: list[str] = []
+        if speaker_id is not None:
+            if not 0 <= speaker_id < len(order):
+                raise HTTPException(409, "stale speaker")
+            voices.append(order[speaker_id])
+        if segment_index is not None:
+            if not 0 <= segment_index < len(segs):
+                raise HTTPException(404, "no such segment")
+            voices.append(segs[segment_index].get("speaker") or "unknown")
+        for sid in segment_ids or []:
+            pre, _, idx = sid.rpartition("-")
+            if pre != cid or not idx.isdigit() or int(idx) >= len(segs):
+                raise HTTPException(404, f"no such segment {sid!r}")
+            voices.append(segs[int(idx)].get("speaker") or "unknown")
+        voices = list(dict.fromkeys(voices))
+        if not voices:
+            raise HTTPException(400, "nothing selected")
+        person = None
+        if assign_type == "is_user" and str(value).lower() in ("true", "1"):
+            person = self.wearer_name()
+        elif assign_type == "person_id" and value:
+            person = next((n for n in self.known_people() if person_id(n) == value), None)
+            if person is None:
+                raise HTTPException(404, "no such person")
+        if person is not None:
+            with self.label_lock:
+                for v in voices:
+                    if v != person:
+                        try:
+                            self.engine.label(cid, v, person)
+                        except KeyError:
+                            raise HTTPException(409, "stale speaker")
+            log.info("app named a voice in %s", cid)
+            # Names in the summary too, without holding up the app.
+            threading.Thread(target=self._resummarize, args=(cid,), daemon=True).start()
+        # Un-assigning and "not a person" have no counterpart in the bridge yet: nothing changes.
+        return self.get(cid)
+
+    def _resummarize(self, cid: str) -> None:
+        try:
+            self.engine.summarize(cid)
+        except Exception:
+            log.exception("summary after naming failed for %s", cid)
 
     # -- offline sync -------------------------------------------------------------
     def run_sync(self, job_id: str, files: list[tuple[str, bytes]]) -> dict:
@@ -410,9 +511,53 @@ class AppAPI:
             # Named voices from the bridge's gallery, so transcript lines can show real names.
             user(authorization)
             now = iso(self.clock())
-            return [{"id": person_id(p["name"]), "name": p["name"], "created_at": now, "updated_at": now,
-                     "speech_samples": []}
-                    for p in self.engine.people() if p["name"] != cfg.wearer]
+            return [{"id": person_id(n), "name": n, "created_at": now, "updated_at": now, "speech_samples": []}
+                    for n in self.known_people()]
+
+        @app.post("/v1/users/people")
+        async def create_person(request: Request, authorization: str | None = Header(None)):
+            # Idempotent by name, like Omi's. The person gets a voice once a speaker is assigned.
+            user(authorization)
+            try:
+                name = (await request.json()).get("name")
+            except ValueError:
+                raise HTTPException(400, "invalid body")
+            if not isinstance(name, str):
+                raise HTTPException(400, "invalid name")
+            n = self.create_person(name)
+            now = iso(self.clock())
+            return {"id": person_id(n), "name": n, "created_at": now, "updated_at": now, "speech_samples": []}
+
+        async def body_json(request: Request) -> dict:
+            raw = await request.body()
+            try:
+                b = json.loads(raw) if raw.strip() else {}
+            except ValueError:
+                raise HTTPException(400, "invalid body")
+            return b if isinstance(b, dict) else {}
+
+        @app.patch("/v1/conversations/{cid}/assign-speaker/{speaker_id}")
+        async def assign_speaker(cid: str, speaker_id: int, request: Request, assign_type: str,
+                                 value: str | None = None, authorization: str | None = Header(None)):
+            user(authorization)
+            b = await body_json(request)
+            return await run_in_threadpool(self.assign, cid, assign_type, value, speaker_id,
+                                           None if b.get("segment_ids") is None else list(b["segment_ids"]))
+
+        @app.patch("/v1/conversations/{cid}/segments/assign-bulk")
+        async def assign_bulk(cid: str, request: Request, authorization: str | None = Header(None)):
+            user(authorization)
+            b = await body_json(request)
+            ids = b.get("segment_ids")
+            if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+                raise HTTPException(422, "segment_ids required")
+            return await run_in_threadpool(self.assign, cid, str(b.get("assign_type")), b.get("value"), None, ids)
+
+        @app.patch("/v1/conversations/{cid}/segments/{idx}/assign")
+        async def assign_segment(cid: str, idx: int, assign_type: str, value: str | None = None,
+                                 authorization: str | None = Header(None)):
+            user(authorization)
+            return await run_in_threadpool(self.assign, cid, assign_type, value, None, None, idx)
 
         # -- offline sync ----------------------------------------------------------
         @app.post("/v2/sync-local-files")

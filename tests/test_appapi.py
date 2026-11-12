@@ -427,3 +427,73 @@ def test_display_name_kept_without_new_session(env):
     u = client.post(f"{base}/getAccountInfo?key=k", json={"idToken": s["idToken"]}).json()["users"][0]
     assert u["displayName"] == "Gabriel Price"
     assert client.post(f"{base}/setAccountInfo?key=k", json={"idToken": "bad"}).status_code == 400
+
+
+# -- naming a speaker from the app (real Engine on fake audio and voiceprints) ---------
+def naming_env(tmp_path, wearer=None):
+    from tests.test_maidiar import FakeTranscriber, audio, engine, run, words_for
+    x, truth = audio([("A", 8), ("B", 7), ("A", 8), ("B", 7)])
+    e = engine(tmp_path, FakeTranscriber(words_for(truth, lambda who, p: {"A": 0, "B": 1}[who])))
+    e.cfg.app_secret, e.cfg.app_uid, e.cfg.wearer, e.cfg.token = SECRET, "owner", wearer, "t"
+    run(e, x, "20261112-100000-conv")
+    now = [1_800_000_000.0]
+    bridge = create_app(e.cfg, engine=e, start_workers=False, clock=lambda: now[0])
+    api = AppAPI(e.cfg, bridge, clock=lambda: now[0])
+    client = TestClient(api.public)
+    return e, api, client, auth(sign_in(e.cfg, client, now)["idToken"]), x
+
+
+def test_app_names_a_voice_and_bridge_learns_it(tmp_path):
+    e, api, client, h, _ = naming_env(tmp_path)
+    cid = "20261112-100000-conv"
+    conv = client.get(f"{P}/v1/conversations/{cid}", headers=h).json()
+    lines = conv["transcript_segments"]
+    assert all(not l["is_user"] and l["person_id"] is None for l in lines)
+    # People sheet: "add person", then assign a line's voice to them (Omi's legacy route,
+    # which the app uses when the recording-speakers route answers 404).
+    assert client.patch(f"{P}/v1/conversations/{cid}/recording-speakers", headers=h, json={}).status_code == 404
+    r = client.post(f"{P}/v1/users/people", headers=h, json={"name": "Bob"})
+    assert r.status_code == 200 and r.json()["name"] == "Bob"
+    assert client.post(f"{P}/v1/users/people", headers=h, json={"name": "bob"}).json()["id"] == r.json()["id"]
+    pid = r.json()["id"]
+    b_line = next(l for l in lines if l["start"] >= 8 and l["start"] < 15)
+    r = client.patch(f"{P}/v1/conversations/{cid}/assign-speaker/{b_line['speaker_id']}",
+                     params={"assign_type": "person_id", "value": pid}, headers=h,
+                     json={"segment_ids": [b_line["id"]], "assign_type": "person_id", "value": pid})
+    assert r.status_code == 200, r.text
+    named = [l for l in r.json()["transcript_segments"] if l["person_id"] == pid]
+    assert named and all(8 <= l["start"] < 15 or 23 <= l["start"] < 30 for l in named)   # every line of B's voice
+    assert "Bob" in e.gallery.people                                                     # voice learned
+    assert pid in [p["id"] for p in client.get(f"{P}/v1/users/people", headers=h).json()]
+    # "This is me" through the bulk route: the wearer name comes from the app profile.
+    (e.cfg.app_dir / "profile.json").write_text(json.dumps({"displayName": "Gabriel"}))
+    a_line = next(l for l in r.json()["transcript_segments"] if l["start"] < 8)
+    r = client.patch(f"{P}/v1/conversations/{cid}/segments/assign-bulk", headers=h,
+                     json={"segment_ids": [a_line["id"]], "assign_type": "is_user", "value": "true"})
+    assert r.status_code == 200, r.text
+    mine = [l for l in r.json()["transcript_segments"] if l["is_user"]]
+    assert mine and all(l["start"] < 8 or 15 <= l["start"] < 23 for l in mine)
+    assert e.cfg.wearer == "Gabriel" and "Gabriel" in e.gallery.people
+    assert "Gabriel" not in [p["name"] for p in client.get(f"{P}/v1/users/people", headers=h).json()]
+    assert json.loads((e.cfg.app_dir / "wearer.json").read_text())["name"] == "Gabriel"
+
+
+def test_app_naming_rejects_bad_input(tmp_path):
+    e, api, client, h, _ = naming_env(tmp_path, wearer="Gabriel")
+    cid = "20261112-100000-conv"
+    base = f"{P}/v1/conversations/{cid}"
+    assert client.patch(f"{base}/assign-speaker/0", params={"assign_type": "person_id", "value": "p-nobody"},
+                        headers=h).status_code == 404
+    assert client.patch(f"{base}/assign-speaker/9", params={"assign_type": "is_user", "value": "true"},
+                        headers=h).status_code == 409
+    assert client.patch(f"{base}/assign-speaker/0", params={"assign_type": "bogus"}, headers=h).status_code == 400
+    assert client.patch(f"{base}/segments/assign-bulk", headers=h,
+                        json={"segment_ids": ["other-0"], "assign_type": "is_user", "value": "true"}).status_code == 404
+    assert client.patch(f"{P}/v1/conversations/nope/assign-speaker/0", params={"assign_type": "is_user", "value": "true"},
+                        headers=h).status_code == 404
+    assert client.post(f"{P}/v1/users/people", headers=h, json={"name": "unknown2"}).status_code == 400
+    assert client.patch(f"{base}/assign-speaker/0", params={"assign_type": "is_user", "value": "true"}).status_code == 401
+    # The wearer set in the environment is used as is; single-line route works too.
+    r = client.patch(f"{base}/segments/0/assign", params={"assign_type": "is_user", "value": "true"}, headers=h)
+    assert r.status_code == 200 and any(l["is_user"] for l in r.json()["transcript_segments"])
+    assert not e.gallery.people.keys() - {"Gabriel"}
