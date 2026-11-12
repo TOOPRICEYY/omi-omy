@@ -136,6 +136,20 @@ hand if it no longer applies.
    `OMI_FIREBASE_AUTH_EMULATOR_HOST=<host>`, `OMI_FIREBASE_AUTH_EMULATOR_PORT=443`
    (or the loopback port), `OMI_DEV_PUBLIC_API_HOST=<host>`.
 
+7. **`app-fork/patches/0005-skip-onboarding.patch`** (`pages/onboarding/wrapper.dart`, +19 lines).
+   Intent: Omi Omy never runs Omi's onboarding steps (language, name, pairing, speech profile,
+   paywall); they called routes the bridge does not serve and could leave the reader stuck.
+   `_enterSteps` (reached after sign-in and consent whenever the local "onboarding completed"
+   flag is not set) calls `_omiomySkipOnboarding`: marks onboarding and permissions done
+   locally, sends `completed: true` in the background without waiting for it, and routes to
+   Home. When the bridge's `GET v1/users/onboarding` already says completed, the app takes its
+   normal `_routeWithPermissionsCheck` path instead, which may show Omi's one-page permissions
+   interstitial (notifications); its Continue goes Home. Pairing stays on Home (Connect); iOS
+   asks for Bluetooth and the microphone at first use.
+   By hand: make the method that starts the onboarding steps go Home in omi-omy builds.
+   Verify: the simulator autopilot after `xcrun simctl keychain <udid> reset` reaches the
+   conversation list without language or name screens.
+
 6. **Phone-side silence gate**: `app-fork/overlay/lib/omiomy_silence_gate.dart` (the logic),
    `app-fork/overlay/lib/omiomy_pendant_gate.dart` (the glue), copied into `app/lib/` by the
    build script, and `app-fork/patches/0004-silence-gate-hook.patch` (`capture_controller.dart`
