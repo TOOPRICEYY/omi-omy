@@ -399,3 +399,16 @@ def test_ios_sdk_v3_endpoints(env):
     r = client.post(f"{base}/getAccountInfo?key=k", json={"idToken": r.json()["idToken"]})
     assert r.json()["users"][0]["localId"] == "owner"
     assert client.post(f"{base}/signupNewUser?key=k", json={}).status_code == 400
+
+
+def test_language_round_trip(env):
+    """Onboarding's language step: PATCH must answer status ok, GET reads it back."""
+    cfg, now, _, api, client = env
+    idt = sign_in(cfg, client, now)["idToken"]
+    assert client.get(f"{P}/v1/users/language", headers=auth(idt)).json() == {"language": "en"}
+    r = client.patch(f"{P}/v1/users/language", headers=auth(idt), json={"language": "en-US"})
+    assert r.status_code == 200 and r.json()["status"] == "ok" and r.json()["single_language_mode"] is False
+    assert client.get(f"{P}/v1/users/language", headers=auth(idt)).json() == {"language": "en-US"}
+    assert client.patch(f"{P}/v1/users/language", headers=auth(idt), json={}).status_code == 400
+    assert client.patch(f"{P}/v1/users/language", json={"language": "de"}).status_code == 401
+    assert client.put(f"{P}/v1/users/time-zone", headers=auth(idt), json={"time_zone": "America/Chicago"}).status_code == 200

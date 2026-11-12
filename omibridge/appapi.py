@@ -308,6 +308,37 @@ class AppAPI:
             user(authorization)
             return {"status": "ok"}
 
+        # The app's primary language (onboarding and Settings > Language). Stored so the app
+        # reads back what it set; the bridge's transcription does not use it.
+        lang_file = cfg.app_dir / "language.json"
+
+        @app.get("/v1/users/language")
+        def get_language(authorization: str | None = Header(None)):
+            user(authorization)
+            try:
+                return {"language": json.loads(lang_file.read_text()).get("language") or "en"}
+            except (OSError, ValueError):
+                return {"language": "en"}
+
+        @app.patch("/v1/users/language")
+        async def set_language(request: Request, authorization: str | None = Header(None)):
+            user(authorization)
+            try:
+                lang = (await request.json()).get("language")
+            except Exception:
+                lang = None
+            if not isinstance(lang, str) or not 1 <= len(lang) <= 35:
+                raise HTTPException(400, "language must be a language code")
+            cfg.app_dir.mkdir(parents=True, exist_ok=True)
+            lang_file.write_text(json.dumps({"language": lang}))
+            return {"status": "ok", "message": "", "single_language_mode": False}
+
+        @app.put("/v1/users/time-zone")
+        def set_time_zone(authorization: str | None = Header(None)):
+            # Accepted and ignored: the bridge keeps the Mac's time zone.
+            user(authorization)
+            return {"status": "ok"}
+
         @app.get("/v1/account/cutover/control")
         def cutover(authorization: str | None = Header(None)):
             user(authorization)
