@@ -26,7 +26,7 @@ index 000000000..9e8303415
 --- /dev/null
 +++ b/app/lib/omiomy.dart
 @@ -0,0 +1,5 @@
-+// omi-omy build switch (applied by ~/omi-omy/app-fork/patches). True only in builds made
++// omi-omy build switch (applied by the omi-omy repo's app-fork/patches). True only in builds made
 +// by omi-omy's scripts/build_fork.sh, which passes --dart-define=OMIOMY=true. The app then
 +// runs as a transcribe-and-summarize app against the omi-omy bridge, and the entry points
 +// to features that backend does not serve are hidden.

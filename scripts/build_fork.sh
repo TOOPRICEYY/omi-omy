@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Builds Omi's own iPhone app in its "dev" flavor, pointed at this bridge instead
 # of Omi's servers. Nothing in Omi's tree is committed: the build tree
-# (~/omi-fork by default) is reset to the pinned upstream commit in
+# (~/Documents/projects/omi-omy/app-build by default, OMI_FORK_DIR to change) is reset to the pinned upstream commit in
 # app-fork/UPSTREAM on every run, Omi's own setup.sh steps prepare it, and the
 # patches in app-fork/patches/ are applied on top.
 #
@@ -29,7 +29,7 @@ set -eu -o pipefail
 HERE=${0:A:h:h}
 PIN=$(head -1 "$HERE/app-fork/UPSTREAM")
 FLUTTER_VERSION=$(sed -n 's/^FLUTTER=//p' "$HERE/app-fork/UPSTREAM")
-FORK=${OMI_FORK_DIR:-$HOME/omi-fork}
+FORK=${OMI_FORK_DIR:-$HOME/Documents/projects/omi-omy/app-build}
 BASE=${OMI_APP_BASE:-https://omi.gabrielprice.com}
 BASE=${BASE%/}
 DEVICE=${OMI_SIM_DEVICE:-iPhone 17}
@@ -98,6 +98,7 @@ flutter pub get >/dev/null
 # Firebase's emulator mode over https when the port is 443 (fails here if the SDK changed).
 /usr/bin/python3 "$HERE/app-fork/pod_patches.py" ios/Pods
 dart run build_runner build --delete-conflicting-outputs >/dev/null
+if [[ -n ${OMI_FORK_PREPARE_ONLY:-} ]]; then echo "prepared $FORK (no build)"; exit 0; fi
 else
   cd "$FORK/app"
 fi
@@ -125,8 +126,10 @@ if [[ -n ${OMI_FORK_DEVICE:-} ]]; then
   flutter build ios --release --flavor dev --no-codesign --build-number="$BUILD_NUMBER" "${DEFINES[@]}" 2>&1 | grep -v -F "$SECRET" | tail -5
   ARCHIVE=build/omiomy.xcarchive
   rm -rf "$ARCHIVE" build/omiomy-export
+  # Archive with the Apple ID signed in to Xcode (Settings > Accounts): with Xcode 27 the API key
+  # alone could not create this app's identifiers and profiles. The key is used for the upload.
   xcodebuild -workspace ios/Runner.xcworkspace -scheme dev -configuration Release-dev -destination 'generic/platform=iOS' \
-    -archivePath "$ARCHIVE" "${AUTH[@]}" archive 2>&1 | grep -v -F "$SECRET" | grep -E "error:|warning: .*[Pp]rovision|ARCHIVE (SUCCEEDED|FAILED)|Signing" | tail -20
+    -archivePath "$ARCHIVE" -allowProvisioningUpdates archive 2>&1 | grep -v -F "$SECRET" | grep -E "error:|warning: .*[Pp]rovision|ARCHIVE (SUCCEEDED|FAILED)|Signing" | tail -20
   [[ -d $ARCHIVE ]] || { echo "archive failed"; exit 1; }
   # Flutter writes the defines (secret included) into Generated.xcconfig; keep it owner-only.
   chmod 600 ios/Flutter/Generated.xcconfig ios/Flutter/flutter_export_environment.sh 2>/dev/null || true

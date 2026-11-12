@@ -1,5 +1,5 @@
 // omi-omy: phone-side silence gate for live pendant audio (copied into the app by
-// ~/omi-omy/scripts/build_fork.sh; hooked in by app-fork/patches/0004).
+// the omi-omy repo's scripts/build_fork.sh; hooked in by app-fork/patches/0004).
 //
 // While nobody speaks, Opus packets from the pendant are held instead of being sent to
 // the bridge. When speech starts, the last second of held audio (pre-roll) is sent

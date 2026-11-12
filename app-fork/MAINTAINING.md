@@ -5,6 +5,13 @@ iPhone app working against this repo's bridge, most often when moving it to a ne
 Omi release. It assumes the Mac mini setup described in the README: this repo at
 `~/omi-omy`, Flutter through fvm, Xcode, CocoaPods.
 
+Where things live on the Mac mini (since 2026-11-12): the running bridge is the repo at
+`~/omi-omy` (launchd cannot start a service whose working folder or logs are in
+`~/Documents`: it exits with code 78, EX_CONFIG, because of macOS's privacy protection of that
+folder). The app build tree is `~/Documents/projects/omi-omy/app-build` (the build script's
+default; `OMI_FORK_DIR` changes it) and the working copy for changes is the git worktree
+`~/Documents/projects/omi-omy/dev` (branch `app-api`; its `.venv` and `models` link to the bridge's).
+
 ## Purpose and design
 
 Omi's own app (github.com/BasedHardware/omi, directory `app/`) talks to Omi's servers
@@ -15,7 +22,7 @@ into conversations, transcribes it, names the speakers it knows, and writes a
 summary.
 
 The build does not fork Omi's code into this repo. `scripts/build_fork.sh` checks out
-a pinned upstream commit into a scratch tree (`~/omi-fork`), applies the
+a pinned upstream commit into a scratch tree (`~/Documents/projects/omi-omy/app-build`), applies the
 modifications kept here in `app-fork/`, and builds Omi's own **dev flavor**. The dev
 flavor already avoids Omi's production services: it uses a dummy Firebase project
 (`demo-omi-local`), signs in through the Firebase Auth *emulator* protocol, and
@@ -164,7 +171,7 @@ hand if it no longer applies.
     zsh scripts/build_fork.sh                       # for the phone: https://omi.gabrielprice.com
     OMI_APP_BASE=http://127.0.0.1:8387 OMI_ENV_FILE=<test env> zsh scripts/build_fork.sh   # simulator vs a test bridge
 
-The script resets `~/omi-fork` (it refuses to touch a tree without its
+The script resets `~/Documents/projects/omi-omy/app-build` (it refuses to touch a tree without its
 `.omi-omy-build` marker), applies the patches, runs Omi's own `setup.sh` dev steps
 (`prepare_mobile_build_env`, `setup_firebase`, `generate_ios_dev_info_plist.sh`,
 `generate_ios_custom_config`), `pod install`, `pod_patches.py`, `build_runner`, and
@@ -232,7 +239,7 @@ Apple's API cannot create it.
 2. Put the commit on line 1 of `app-fork/UPSTREAM`, and the Flutter version from
    `.github/workflows/mobile-app-checks.yml` in `FLUTTER=`; `fvm install` it.
 3. Run the build. If a patch fails to apply, redo it by hand as described above and
-   regenerate it with `git diff` in `~/omi-fork`. If `pod_patches.py` stops the build,
+   regenerate it with `git diff` in `~/Documents/projects/omi-omy/app-build`. If `pod_patches.py` stops the build,
    update its expected lines for the new FirebaseAuth version.
 4. If the app's API changed, change `omibridge/appapi.py` and the contract tests first.
 5. Run the checks above; only then rebuild for the phone.
