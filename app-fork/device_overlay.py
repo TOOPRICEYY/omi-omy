@@ -2,7 +2,7 @@
 omi-omy app. Run by scripts/build_fork.sh in device mode, after Omi's setup steps and
 before `pod install`. Never committed to Omi's tree.
 
-    python3 app-fork/device_overlay.py <path to omi app/> <team id> <bundle id> <display name>
+    python3 app-fork/device_overlay.py <path to omi app/> <team id> <bundle id> <display name> <version> <build>
 
 What it changes, and why:
 - The Apple team: Omi's (9536L8KLMP) becomes the owner's, in every target.
@@ -11,6 +11,8 @@ What it changes, and why:
   Omi's own app. The watch app and widget derive their ids from it (.watchapp, .widget).
 - Firebase's GoogleService-Info.plist BUNDLE_ID: the native SDK refuses to start when it
   does not match the running app.
+- Version and build number in every target: the watch app and widget hard-code 1.0 / 1,
+  and App Store Connect refuses a watch app whose version differs from its iPhone app.
 - The app group: Omi's group id is registered to Omi's team, so the app, widget and
   Swift code that share data through it get group.<bundle id>.
 - Entitlements the owner's build does not use and that would need extra provisioning:
@@ -44,13 +46,15 @@ def sub(path: Path, pattern: str, repl: str, min_count: int = 1) -> None:
     path.write_text(new)
 
 
-def main(app: Path, team: str, bundle: str, name: str) -> None:
+def main(app: Path, team: str, bundle: str, name: str, version: str, build: str) -> None:
     ios = app / "ios"
     group = "group." + bundle
     pbx = ios / "Runner.xcodeproj" / "project.pbxproj"
 
     sub(pbx, re.escape(f"DEVELOPMENT_TEAM = {OMI_TEAM};"), f"DEVELOPMENT_TEAM = {team};", min_count=5)
     sub(pbx, r'INFOPLIST_KEY_CFBundleDisplayName = (?:Omi|omi|"Omi Dev");', f'INFOPLIST_KEY_CFBundleDisplayName = "{name}";')
+    sub(pbx, r"MARKETING_VERSION = [^;]+;", f"MARKETING_VERSION = {version};", min_count=3)
+    sub(pbx, r"CURRENT_PROJECT_VERSION = [^;]+;", f"CURRENT_PROJECT_VERSION = {build};", min_count=3)
 
     for cfg in ("devDebug", "devProfile", "devRelease"):
         p = ios / "Flutter" / f"{cfg}.xcconfig"
@@ -80,9 +84,9 @@ def main(app: Path, team: str, bundle: str, name: str) -> None:
         fail(f"no source uses {OMI_GROUP}")
     for p in code:
         p.write_text(p.read_text().replace(OMI_GROUP, group))
-    print(f"device_overlay: team {team}, bundle {bundle}, name {name!r}, group {group}, "
+    print(f"device_overlay: team {team}, bundle {bundle}, name {name!r}, version {version} ({build}), group {group}, "
           f"{len(ents)} entitlement files, {len(code)} source files")
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]), *sys.argv[2:5])
+    main(Path(sys.argv[1]), *sys.argv[2:7])

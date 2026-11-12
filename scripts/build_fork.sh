@@ -89,7 +89,9 @@ OMI_DEV_HOST=$HOST bash -c 'set -euo pipefail
 sed -i '' -E '/^[[:space:]]*(POSTHOG|INTERCOM)_/d' .dev.env
 if [[ -n ${OMI_FORK_DEVICE:-} ]]; then
   : ${OMI_APPLE_TEAM:?set OMI_APPLE_TEAM to your Apple team id}
-  /usr/bin/python3 "$HERE/app-fork/device_overlay.py" . "$OMI_APPLE_TEAM" "${OMI_BUNDLE_ID:-com.gabrielprice.omiomy}" "${OMI_APP_NAME:-Omi Omy}"
+  BUILD_NUMBER=${OMI_BUILD_NUMBER:-$(date +%Y%m%d%H%M)}
+  BUILD_NAME=$(sed -n 's/^version: *\([^+]*\).*/\1/p' pubspec.yaml)
+  /usr/bin/python3 "$HERE/app-fork/device_overlay.py" . "$OMI_APPLE_TEAM" "${OMI_BUNDLE_ID:-com.gabrielprice.omiomy}" "${OMI_APP_NAME:-Omi Omy}" "$BUILD_NAME" "$BUILD_NUMBER"
 fi
 
 # 3. Build.
@@ -122,8 +124,7 @@ if [[ -n ${OMI_FORK_DEVICE:-} ]]; then
   : ${ASC_KEY_PATH:?} ${ASC_KEY_ID:?} ${ASC_ISSUER_ID:?}
   AUTH=(-allowProvisioningUpdates -authenticationKeyPath "$ASC_KEY_PATH" -authenticationKeyID "$ASC_KEY_ID"
         -authenticationKeyIssuerID "$ASC_ISSUER_ID")
-  BUILD_NUMBER=${OMI_BUILD_NUMBER:-$(date +%Y%m%d%H%M)}
-  flutter build ios --release --flavor dev --no-codesign --build-number="$BUILD_NUMBER" "${DEFINES[@]}" 2>&1 | grep -v -F "$SECRET" | tail -5
+  flutter build ios --release --flavor dev --no-codesign --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER" "${DEFINES[@]}" 2>&1 | grep -v -F "$SECRET" | tail -5
   ARCHIVE=build/omiomy.xcarchive
   rm -rf "$ARCHIVE" build/omiomy-export
   # Archive with the Apple ID signed in to Xcode (Settings > Accounts): with Xcode 27 the API key
