@@ -412,3 +412,18 @@ def test_language_round_trip(env):
     assert client.patch(f"{P}/v1/users/language", headers=auth(idt), json={}).status_code == 400
     assert client.patch(f"{P}/v1/users/language", json={"language": "de"}).status_code == 401
     assert client.put(f"{P}/v1/users/time-zone", headers=auth(idt), json={"time_zone": "America/Chicago"}).status_code == 200
+
+
+def test_display_name_kept_without_new_session(env):
+    """Onboarding's name step: updateProfile must not hand out new tokens (the app would
+    discard the onboarding save made under the old session), and lookup returns the name."""
+    cfg, now, _, api, client = env
+    s = sign_in(cfg, client, now)
+    base = "/www.googleapis.com/identitytoolkit/v3/relyingparty"
+    r = client.post(f"{base}/setAccountInfo?key=k", json={"idToken": s["idToken"], "displayName": "Gabriel Price",
+                                                          "returnSecureToken": True})
+    assert r.status_code == 200 and r.json()["displayName"] == "Gabriel Price"
+    assert "idToken" not in r.json() and "refreshToken" not in r.json()
+    u = client.post(f"{base}/getAccountInfo?key=k", json={"idToken": s["idToken"]}).json()["users"][0]
+    assert u["displayName"] == "Gabriel Price"
+    assert client.post(f"{base}/setAccountInfo?key=k", json={"idToken": "bad"}).status_code == 400

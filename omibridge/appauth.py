@@ -27,6 +27,7 @@ import json
 import logging
 import secrets
 import time
+from pathlib import Path
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import JSONResponse
 
@@ -131,10 +132,16 @@ def custom_token_router(tokens: Tokens) -> APIRouter:
     return r
 
 
-def emulator_router(tokens: Tokens) -> APIRouter:
+def emulator_router(tokens: Tokens, profile_path: Path | None = None) -> APIRouter:
     """The Firebase Auth emulator's REST calls, at the root of the public port. They
     only exchange a valid custom or refresh token for an ID token."""
     r = APIRouter()
+
+    def profile() -> dict:
+        try:
+            return json.loads(profile_path.read_text()) if profile_path else {}
+        except (OSError, ValueError):
+            return {}
 
     @r.get("/")
     def emulator_root():
@@ -193,15 +200,26 @@ def emulator_router(tokens: Tokens) -> APIRouter:
                 "localId": tokens.uid, "lastLoginAt": ms, "createdAt": ms, "customAuth": True,
                 "emailVerified": False, "disabled": False, "providerUserInfo": [],
                 "lastRefreshAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(tokens.clock())),
+                **{k: v for k, v in profile().items() if k in ("displayName", "photoUrl")},
             }]}
         if action == "accounts:update":
-            # Profile edits (display name and so on) are accepted and dropped.
+            # Profile edits: the display name (onboarding's name step) is kept and returned by
+            # lookup. No new tokens: a new session here makes the app discard what it was saving.
             try:
                 tokens.check_id(body.get("idToken", ""))
             except PermissionError:
                 return error("INVALID_ID_TOKEN")
+            prof = profile()
+            for key in ("displayName", "photoUrl"):
+                if isinstance(body.get(key), str):
+                    prof[key] = body[key][:200]
+            for key in body.get("deleteAttribute") or []:
+                prof.pop({"DISPLAY_NAME": "displayName", "PHOTO_URL": "photoUrl"}.get(key, key), None)
+            if profile_path:
+                profile_path.parent.mkdir(parents=True, exist_ok=True)
+                profile_path.write_text(json.dumps(prof))
             return {"kind": "identitytoolkit#SetAccountInfoResponse", "localId": tokens.uid,
-                    "providerUserInfo": [], **session(int(tokens.clock()))}
+                    "providerUserInfo": [], **{k: v for k, v in prof.items() if k in ("displayName", "photoUrl")}}
         log.warning("unsupported emulator call %s (fields: %s)", action, sorted(body))
         return error("OPERATION_NOT_ALLOWED")
 

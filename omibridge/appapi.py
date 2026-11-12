@@ -176,7 +176,7 @@ class AppAPI:
         # The public port: the webhook, the sign-in emulator calls at the root, and this API
         # under the secret path, behind size caps and a limiter on failed checks.
         self.limiter = FailureLimiter(clock)
-        bridge.state.public.include_router(emulator_router(self.tokens))
+        bridge.state.public.include_router(emulator_router(self.tokens, cfg.app_dir / "profile.json"))
         self.public = PublicGate(bridge.state.public, self.app, cfg.app_secret, self.limiter)
 
     # A session key per app account, separate from webhook users.
