@@ -84,11 +84,15 @@ clearest speech (turns of 1.5 s or more, 0.2 s trimmed off each edge, up to 30 s
 are linked by clustering those voiceprints, never joining two speakers of one piece. The same
 voiceprints are matched against the gallery; a speaker with less than `OMIBRIDGE_MIN_NAME_SECONDS`
 (3 s) of clear speech stays unnamed. If MAI fails or returns no labels, that conversation is
-diarized locally (below) and the log says so; `meta.json` records which path ran (`diarizer`),
-and `/health` shows the mode. On 3 AMI meetings (2026-11-12) this credited 2.6% of words to the
-wrong person, against 18-22% for the local diarizer. Putting known people's clips at the start
-of the upload so MAI labels them itself did not work (27-55% wrong): MAI often gives several
-prefix voices one label.
+diarized locally (below) and the log says so (rate limits and provider errors are retried
+with backoff first); `meta.json` records which path ran (`diarizer`),
+and `/health` shows the mode. On 3 AMI meetings (2026-11-12) this credited 0.4-4% of words to the
+wrong person (also when uploaded in 3 pieces), against 18-22% for the local diarizer; about 1 s per
+minute of speech for MAI plus 1 s for voiceprints. Live: 10-20 s wall time per minute of speech,
+plus ~8 s per conversation for upload and summary. Putting known people's clips at the start
+of the upload so MAI labels them itself: one person's 5-10 s clip got their label right 6/6 times,
+four clips 2-4/4, and the prefix made the rest of the diarization worse in 9 of 12 runs, so it is
+not used. Speakers can be named from the app (see app-fork/MAINTAINING.md) or the review page.
 
 `OMIBRIDGE_DIARIZER=local`, or the fallback: optional GPU speaker segmentation (Apple Silicon): `OMIBRIDGE_DIARIZER_DEVICE=mps` runs
 DiariZen's original PyTorch model (pinned in `omibridge/gpu_segmentation.py`) on the GPU instead
