@@ -58,6 +58,14 @@ class Config:
     diarizer: str = field(default_factory=lambda: os.environ.get("OMIBRIDGE_DIARIZER", "mai").strip().lower())
     # A MAI speaker needs this much clear speech (turns of 1.5 s or more) before it is named.
     min_name_seconds: float = field(default_factory=lambda: _f("OMIBRIDGE_MIN_NAME_SECONDS", 3.0))
+    # What goes to MAI: "speech" (Silero's speech stretches, packed) or "all" (the whole
+    # conversation). Measured 2026-11-12 on 18 conversations: "speech" lost ~40% of the words
+    # MAI finds in the whole recording (muffled pendant speech scores near 0 in Silero) and
+    # moved 14% of the remaining words to another speaker; "all" costs ~2.7x more MAI time.
+    mai_audio: str = field(default_factory=lambda: os.environ.get("OMIBRIDGE_MAI_AUDIO", "speech").strip().lower())
+    # What the conversation speech detector hears: "raw", or "hp150norm" (150 Hz high-pass plus
+    # one gain per recording; recovers about a third of the lost words at 46% of audio sent).
+    vad_front: str = field(default_factory=lambda: os.environ.get("OMIBRIDGE_VAD_FRONT", "raw").strip().lower())
     segmentation: str = field(default_factory=lambda: os.environ.get("OMIBRIDGE_SEGMENTATION", "diarizen"))
     # "mps": DiariZen's PyTorch model on the Mac's GPU (needs requirements-gpu.txt; falls back
     # to the ONNX model on the CPU when unavailable). Only applies to the diarizen segmentation.

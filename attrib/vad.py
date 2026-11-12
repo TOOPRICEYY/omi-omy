@@ -76,9 +76,24 @@ class EnergyGate:
         return merge_regions(regions, 0.0)
 
 
+def hp_norm(x: np.ndarray, sr: int = SR, cutoff: float = 150.0, target_db: float = -20.0) -> np.ndarray:
+    """What the speech detector should hear from a pendant: a 150 Hz high-pass removes the
+    clothing/handling rumble that can sit 20 dB above a muffled voice (Silero scores such speech
+    near 0), then one gain per recording puts the loud end of its 0.5 s frames at `target_db`."""
+    from scipy.signal import butter, sosfilt
+
+    y = sosfilt(butter(4, cutoff, "hp", fs=sr, output="sos"), x).astype(np.float32)
+    n = len(y) // (sr // 2) * (sr // 2)
+    if n == 0:
+        return y
+    rms = np.sqrt(np.mean(y[:n].reshape(-1, sr // 2) ** 2, axis=1)) + 1e-9
+    g = min(10 ** (target_db / 20) / float(np.percentile(rms, 95)), 0.99 / (float(np.abs(y).max()) + 1e-9), 100.0)
+    return (y * g).astype(np.float32)
+
+
 class SileroVAD:
     def __init__(self, threshold: float = 0.15, pad: float = 0.3, merge_gap: float = 1.0,
-                 min_speech: float = 0.25):
+                 min_speech: float = 0.25, front: str = "raw"):
         from silero_vad import load_silero_vad
 
         self.model = load_silero_vad(onnx=True)
@@ -86,12 +101,14 @@ class SileroVAD:
         self.pad = pad
         self.merge_gap = merge_gap
         self.min_speech = min_speech
+        self.front = front      # "raw", or "hp150norm" (see hp_norm)
 
     def __call__(self, x: np.ndarray, sr: int = SR) -> list[Region]:
         import torch
         from silero_vad import get_speech_timestamps
 
-        ts = get_speech_timestamps(torch.from_numpy(x), self.model, sampling_rate=sr,
+        heard = hp_norm(x, sr) if self.front == "hp150norm" else x
+        ts = get_speech_timestamps(torch.from_numpy(np.ascontiguousarray(heard, dtype=np.float32)), self.model, sampling_rate=sr,
                                    threshold=self.threshold,
                                    min_speech_duration_ms=int(self.min_speech * 1000),
                                    return_seconds=True)

@@ -196,3 +196,42 @@ def test_transcriber_retries_rate_limits(monkeypatch):
     sf.write(buf, np.zeros(SR, np.float32), SR, format="WAV")
     words = t(buf.getvalue(), diarize=True)
     assert [(w.text, w.speaker) for w in words] == [("hi", "p0:1")] and waits == [5.0, 15.0]
+
+
+def test_mai_audio_all_sends_the_whole_conversation(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMIBRIDGE_MAI_AUDIO", "all")
+    x, truth = audio([("A", 6), ("B", 6)])
+    x = np.concatenate([np.zeros(5 * SR, np.float32), x])           # 5 s of silence first
+    words = [Word(w.text, w.start + 5, w.end + 5, w.speaker) for w in words_for(truth, lambda who, p: {"A": 0, "B": 1}[who])]
+    sizes = []
+
+    class Recording(FakeTranscriber):
+        def __call__(self, wav, phrases=None, diarize=False):
+            import io, soundfile as sf
+            sizes.append(len(sf.read(io.BytesIO(wav))[0]))
+            return super().__call__(wav, phrases, diarize)
+
+    e = engine(tmp_path, Recording(words))
+    e.vad = lambda y: [Region(5.0, len(y) / SR)]                      # the detector's speech
+    doc = run(e, x)
+    assert sizes == [len(x)]                                           # whole recording went to MAI
+    assert abs(doc["segments"][0]["start"] - 5.0) < 0.05                # times map 1:1
+    meta = json.loads((tmp_path / "conversations/c1/meta.json").read_text())
+    assert abs(meta["speech_seconds"] - 12.0) < 0.01 and meta["diarizer"] == "mai"
+
+
+def test_hp_norm_removes_rumble_and_levels():
+    from attrib.vad import hp_norm
+    t = np.arange(4 * SR) / SR
+    x = (0.3 * np.sin(2 * np.pi * 40 * t) + 0.01 * np.sin(2 * np.pi * 1000 * t)).astype(np.float32)
+    y = hp_norm(x)
+
+    def band(s, f):
+        S = np.abs(np.fft.rfft(s)) ** 2
+        fr = np.fft.rfftfreq(len(s), 1 / SR)
+        return S[(fr > f - 5) & (fr < f + 5)].sum()
+
+    before = 10 * np.log10(band(x, 1000) / band(x, 40))
+    after = 10 * np.log10(band(y, 1000) / band(y, 40))
+    assert after - before > 30 and np.abs(y).max() <= 0.99
+    assert abs(20 * np.log10(np.sqrt(np.mean(y ** 2))) - (-20)) < 2      # voice brought up to about -20 dBFS
