@@ -95,6 +95,24 @@ def test_retry_and_preroll(tmp_path):
     assert (cfg.live_dir / "u.pcm").stat().st_size == 2 * SR * 3             # 2 s kept from before + 1 s
 
 
+def test_preroll_does_not_cross_a_gap(tmp_path):
+    cfg, now, m = _manager(tmp_path)
+    # Quiet tail of one recording, then an hour later a quiet second and speech.
+    m.ingest("u", SR, _pcm(1, 0.0))
+    now[0] += 3600
+    m.ingest("u", SR, _pcm(1, 0.0))
+    now[0] += 1
+    assert m.ingest("u", SR, _pcm(1, 0.5))["state"] == "recording"
+    assert (cfg.live_dir / "u.pcm").stat().st_size == 2 * SR * 2   # its own quiet second + 1 s, nothing older
+    assert m.sessions["u"].started_at == now[0] - 2
+    # Speech straight after a gap gets no pre-roll at all.
+    m.ingest("v", SR, _pcm(1, 0.0))
+    now[0] += 3600
+    m.ingest("v", SR, _pcm(1, 0.5))
+    assert (cfg.live_dir / "v.pcm").stat().st_size == 2 * SR
+    assert m.sessions["v"].started_at == now[0] - 1
+
+
 def test_import_recording_is_queued_and_split(tmp_path):
     import json
 

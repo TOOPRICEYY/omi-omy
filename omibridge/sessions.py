@@ -24,6 +24,7 @@ from .config import Config
 
 TAIL = 2     # seconds kept after the last speech
 PREROLL = 3  # seconds kept from before the first speech
+PREROLL_GAP = 2  # seconds of missing audio after which the pre-roll is stale
 
 
 @dataclass
@@ -51,6 +52,7 @@ class SessionManager:
         self.lock = threading.Lock()
         self.sessions: dict[str, Session] = {}
         self.preroll: dict[str, bytes] = {}     # last few seconds heard while idle
+        self.preroll_at: dict[str, float] = {}  # when the pre-roll's last audio was received
         self.seen: OrderedDict[str, None] = OrderedDict()  # recent Idempotency-Keys
         cfg.ensure_dirs()
 
@@ -76,11 +78,12 @@ class SessionManager:
                 self._close(s, now)
                 s = None
             if s is None:
+                pre = self._lead_in(uid, now - len(body) / 2 / sample_rate)
                 if spoken <= 0:
                     # Omi sends one-second pieces, so keep a little to not clip the first word.
-                    self.preroll[uid] = (self.preroll.get(uid, b"") + body)[-PREROLL * sample_rate * 2:]
+                    self.preroll[uid] = (pre + body)[-PREROLL * sample_rate * 2:]
+                    self.preroll_at[uid] = now
                     return {"state": "idle"}
-                pre = self.preroll.pop(uid, b"")
                 s = Session(uid, sample_rate, now - (len(pre) + len(body)) / 2 / sample_rate,
                             samples=len(pre) // 2)
                 self.sessions[uid] = s
@@ -96,6 +99,14 @@ class SessionManager:
             if s.samples / s.sample_rate >= self.cfg.max_minutes * 60:
                 return {"state": "closed", "id": self._close(s, now)}
             return {"state": "recording", "seconds": round(s.samples / s.sample_rate, 1)}
+
+    def _lead_in(self, uid: str, start: float) -> bytes:
+        """Take the pre-roll if it runs up to `start`. Quiet audio from before a gap (an earlier
+        recording in an offline upload, a dropped connection) is not this audio's lead-in, and
+        prepending it would put the conversation's start time too early."""
+        pre = self.preroll.pop(uid, b"")
+        end = self.preroll_at.pop(uid, start)
+        return pre if start - end <= PREROLL_GAP else b""
 
     def sweep(self) -> list[str]:
         """Close sessions that have gone quiet. Returns the queued conversation ids."""
