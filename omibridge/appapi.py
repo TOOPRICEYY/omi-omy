@@ -328,6 +328,9 @@ class AppAPI:
             log.info("app named a voice in %s", cid)
             # Names in the summary too, without holding up the app.
             threading.Thread(target=self._resummarize, args=(cid,), daemon=True).start()
+            rerender = getattr(self.engine, "rerender_all", None)
+            if rerender:
+                threading.Thread(target=rerender, kwargs={"skip": cid}, daemon=True).start()
         # Un-assigning and "not a person" have no counterpart in the bridge yet: nothing changes.
         return self.get(cid)
 

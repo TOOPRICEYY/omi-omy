@@ -191,6 +191,16 @@ class Engine:
         names, _ = self.name_clusters(st["clusters"], st["pinned"])
         labels = [l for l, n in names.items() if n == speaker]
         if not labels:
+            # The page (or the app) shows the names from the last render; the gallery may have
+            # learned voices since, so the same voice can have a new name now. Use the clusters
+            # behind the name that was shown.
+            try:
+                shown = json.loads((out / "conversation.json").read_text())["speakers"]
+                labels = [l for sp in shown if sp["name"] == speaker for l in sp.get("clusters", [])
+                          if any(c.label == l for c in st["clusters"])]
+            except (OSError, ValueError, KeyError):
+                labels = []
+        if not labels:
             raise KeyError(f"no speaker {speaker!r} in {cid}")
         for c in st["clusters"]:
             if c.label in labels:
@@ -203,6 +213,21 @@ class Engine:
         if learn:
             self.save_gallery()
         return self.render(cid)
+
+    def rerender_all(self, skip: str | None = None) -> int:
+        """Re-render every conversation with the current gallery (after a voice was learned), so
+        pages show the new names. Returns how many were re-rendered."""
+        n = 0
+        for d in sorted(self.cfg.conv_dir.glob("*/state.pkl")):
+            cid = d.parent.name
+            if cid == skip:
+                continue
+            try:
+                self.render(cid)
+                n += 1
+            except Exception:
+                log.exception("re-render of %s failed", cid)
+        return n
 
     def enroll(self, person: str, x: np.ndarray, sr: int) -> int:
         """Add a person from a clean recording of them alone. Returns the number of voiceprints added."""

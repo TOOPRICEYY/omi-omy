@@ -196,3 +196,34 @@ def test_transcriber_retries_rate_limits(monkeypatch):
     sf.write(buf, np.zeros(SR, np.float32), SR, format="WAV")
     words = t(buf.getvalue(), diarize=True)
     assert [(w.text, w.speaker) for w in words] == [("hi", "p0:1")] and waits == [5.0, 15.0]
+
+
+def test_label_uses_the_name_the_page_showed_after_the_gallery_learned(tmp_path):
+    x, truth = audio([("A", 8), ("B", 7), ("A", 8), ("B", 7)])
+    e = engine(tmp_path, FakeTranscriber(words_for(truth, lambda who, p: {"A": 0, "B": 1}[who])))
+    doc = run(e, x, "c1")
+    shown = {s["name"] for s in doc["speakers"]}
+    assert shown == {"unknown1", "unknown2"}
+    run(e, x, "c2")
+    # Naming A in another conversation teaches the gallery A's voice ...
+    a_name = next(s["name"] for s in e.render("c2")["speakers"] if "S0" in s["clusters"])
+    e.label("c2", a_name, "Alice")
+    assert "Alice" in {s["name"] for s in e.render("c1")["speakers"]}      # c1 would now say Alice
+    # ... but c1's stored page still shows the old names until it is re-rendered; naming from it works.
+    old = json.loads((tmp_path / "conversations/c1/conversation.json").read_text())
+    stale_b = next(s["name"] for s in old["speakers"] if "S1" in s["clusters"])
+    stale_a = next(s["name"] for s in old["speakers"] if "S0" in s["clusters"])
+    e.label("c1", stale_a, "Alice")
+    doc = e.label("c1", stale_b, "Bob")
+    assert {s["name"] for s in doc["speakers"]} == {"Alice", "Bob"}
+
+
+def test_rerender_all_refreshes_pages(tmp_path):
+    x, truth = audio([("A", 8), ("B", 7), ("A", 8), ("B", 7)])
+    e = engine(tmp_path, FakeTranscriber(words_for(truth, lambda who, p: {"A": 0, "B": 1}[who])))
+    run(e, x, "c1"); run(e, x, "c2")
+    a_name = next(s["name"] for s in e.render("c2")["speakers"] if "S0" in s["clusters"])
+    e.label("c2", a_name, "Alice")
+    assert e.rerender_all(skip="c2") == 1
+    page = json.loads((tmp_path / "conversations/c1/conversation.json").read_text())
+    assert "Alice" in {s["name"] for s in page["speakers"]}

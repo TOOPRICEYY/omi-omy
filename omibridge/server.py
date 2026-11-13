@@ -231,6 +231,9 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
         if doc.get("summary"):
             # The summary may mention the speaker by the old name; redo it in the background.
             threading.Thread(target=summarize, args=(cid,), daemon=True).start()
+        if learn:
+            # Other conversations may now recognise this voice; refresh their pages.
+            threading.Thread(target=engine.rerender_all, kwargs={"skip": cid}, daemon=True).start()
         return doc
 
     @app.post("/api/conversations/{cid}/summarize")
