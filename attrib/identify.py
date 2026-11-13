@@ -60,8 +60,11 @@ class IdentifyConfig:
     # best `top_k`), whatever the normalized score says. Normalization turns a modest similarity
     # into a high score when a gallery sample is unlike the whole cohort, which is what a sample
     # learned from quiet, distant speech is: such an entry then matches every far-off voice.
-    # None switches the check off.
+    # None switches the check off. The wearer's entry can have its own floor (None: the same):
+    # the wearer is also told apart by loudness, and an entry with few samples of a voice that
+    # is heard in every setting has lower plain similarities than one heard in a single setting.
     raw_floor: float | None = None
+    wearer_raw_floor: float | None = None
     prior_weight: float = 1.0      # per unit of log-odds of the prior
     wearer: str | None = None
     wearer_weight: float = 1.5     # bonus at +6 dB louder than the others
@@ -128,7 +131,9 @@ class Identifier:
         # ok[i, j]: cluster i may be named person j at all.
         ok = A >= cfg.acoustic_floor
         if cfg.raw_floor is not None:
-            ok &= np.array([[self.raw(c.centroid, p) for p in people] for c in clusters]) >= cfg.raw_floor
+            floors = np.array([cfg.wearer_raw_floor if p == cfg.wearer and cfg.wearer_raw_floor is not None
+                               else cfg.raw_floor for p in people])
+            ok &= np.array([[self.raw(c.centroid, p) for p in people] for c in clusters]) >= floors
         S = A.copy()
         if priors:
             for j, p in enumerate(people):
@@ -159,14 +164,17 @@ class Identifier:
                 out[c.label] = Match(UNKNOWN, best, _sigmoid((cfg.threshold - best) / cfg.confidence_scale), runner)
         if cfg.merge_split_clusters:
             # Diarization can split one voice into two clusters. A cluster that clearly matches a
-            # person who went to another cluster joins that person: when it was left unnamed, and
-            # also when it was handed its second choice instead (one's own voice, split in two,
-            # must not come out under the next best name).
+            # person who went to another cluster joins that person when it was left unnamed. When
+            # it was handed its second choice instead, it joins only the wearer: the wearer's is
+            # the voice that gets split (most speech, at every loudness), and an entry that
+            # matches too widely must not pull a cluster away from another name this way.
             for i, c in enumerate(clusters):
                 j = int(np.where(ok[i], S[i], -np.inf).argmax())
-                if not ok[i, j] or S[i, j] < cfg.threshold + 1.0 or given.get(i) == j:
+                if not ok[i, j] or S[i, j] < cfg.threshold + 1.0:
                     continue
-                if i not in given or S[i, j] - S[i, given[i]] >= 1.0:
+                if not any(k != i and jj == j for k, jj in given.items()):
+                    continue                                   # nobody else is that person here
+                if i not in given or (people[j] == cfg.wearer and S[i, j] - S[i, given[i]] >= 1.0):
                     out[c.label] = Match(people[j], float(S[i, j]),
                                          _sigmoid((S[i, j] - cfg.threshold) / cfg.confidence_scale),
                                          out[c.label].runner_up)

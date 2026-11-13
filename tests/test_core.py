@@ -108,17 +108,42 @@ def test_identify_one_person_per_cluster_and_merge():
 
 def test_split_voice_does_not_get_the_next_best_name():
     rng, people, g, cohort = _world()
-    # "ann" sounds a little like bob here, enough to clear the threshold as a second choice.
-    g.people["ann"] = [l2norm(people["ann"] + 0.6 * people["bob"] + 0.05 * rng.standard_normal(32)) for _ in range(5)]
-    ident = Identifier(g, cohort, IdentifyConfig(wearer=None))
-    b1 = people["bob"] + 0.05 * rng.standard_normal(32)
-    b2 = people["bob"] + 0.05 * rng.standard_normal(32)
-    assert ident.score(l2norm(b2), "ann") >= ident.cfg.threshold                 # would pass as ann
-    m = ident.identify([_cluster("S0", b1), _cluster("S1", b2)])
-    assert m["S0"].person == "bob" and m["S1"].person == "bob"                   # both bob, not bob and ann
-    # A real ann next to bob is still ann.
-    m = ident.identify([_cluster("S0", b1), _cluster("S1", g.people["ann"][0])])
-    assert m["S0"].person == "bob" and m["S1"].person == "ann"
+    # "ann" sounds a little like the wearer here, enough to clear the threshold as a second choice.
+    g.people["ann"] = [l2norm(people["ann"] + 0.6 * people["wearer"] + 0.05 * rng.standard_normal(32))
+                       for _ in range(5)]
+    ident = Identifier(g, cohort, IdentifyConfig(wearer="wearer"))
+    w1 = people["wearer"] + 0.05 * rng.standard_normal(32)
+    w2 = people["wearer"] + 0.05 * rng.standard_normal(32)
+    assert ident.score(l2norm(w2), "ann") >= ident.cfg.threshold                 # would pass as ann
+    m = ident.identify([_cluster("S0", w1), _cluster("S1", w2)])
+    assert m["S0"].person == "wearer" and m["S1"].person == "wearer"             # not wearer and ann
+    # A real ann next to the wearer is still ann.
+    m = ident.identify([_cluster("S0", w1), _cluster("S1", g.people["ann"][0])])
+    assert m["S0"].person == "wearer" and m["S1"].person == "ann"
+
+
+def test_only_the_wearer_takes_a_cluster_from_another_name():
+    rng, people, g, cohort = _world()
+    # An entry that matches too widely (here: bob's) outscores ann on ann's own voice.
+    g.people["bob"] = [l2norm(people["bob"] + 0.9 * people["ann"] + 0.05 * rng.standard_normal(32))
+                       for _ in range(5)]
+    g.people["ann"] = [l2norm(people["ann"] + 0.8 * rng.standard_normal(32) / np.sqrt(32)) for _ in range(5)]
+    ident = Identifier(g, cohort, IdentifyConfig(wearer="wearer"))
+    a = l2norm(people["ann"] + 0.3 * people["bob"])
+    b = g.people["bob"][0]
+    assert ident.score(a, "bob") - ident.score(a, "ann") >= 1.0 and ident.score(a, "ann") >= ident.cfg.threshold
+    m = ident.identify([_cluster("S0", a), _cluster("S1", b)])
+    assert m["S0"].person == "ann" and m["S1"].person == "bob"                   # not two bobs
+
+
+def test_wearer_can_have_its_own_raw_floor():
+    rng, people, g, cohort = _world()
+    probe = l2norm(people["wearer"] + 0.08 * rng.standard_normal(32))            # the wearer, less alike
+    raw = Identifier(g, cohort, IdentifyConfig()).raw(probe, "wearer")
+    strict = IdentifyConfig(wearer="wearer", raw_floor=raw + 0.05)
+    assert Identifier(g, cohort, strict).identify([_cluster("S0", probe)])["S0"].person == UNKNOWN
+    own = IdentifyConfig(wearer="wearer", raw_floor=raw + 0.05, wearer_raw_floor=raw - 0.05)
+    assert Identifier(g, cohort, own).identify([_cluster("S0", probe)])["S0"].person == "wearer"
 
 
 def test_raw_floor_stops_an_outlier_sample_from_matching_everyone():
