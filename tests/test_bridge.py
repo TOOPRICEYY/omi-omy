@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from attrib.types import Turn, Word
 from omibridge.config import Config
@@ -92,3 +93,103 @@ def test_retry_and_preroll(tmp_path):
     assert m.ingest("u", SR, _pcm(1, 0.5), key="c")["state"] == "recording"
     assert m.ingest("u", SR, _pcm(1, 0.5), key="c")["state"] == "duplicate"   # Omi retried the same POST
     assert (cfg.live_dir / "u.pcm").stat().st_size == 2 * SR * 3             # 2 s kept from before + 1 s
+
+
+def test_preroll_does_not_cross_a_gap(tmp_path):
+    cfg, now, m = _manager(tmp_path)
+    # Quiet tail of one recording, then an hour later a quiet second and speech.
+    m.ingest("u", SR, _pcm(1, 0.0))
+    now[0] += 3600
+    m.ingest("u", SR, _pcm(1, 0.0))
+    now[0] += 1
+    assert m.ingest("u", SR, _pcm(1, 0.5))["state"] == "recording"
+    assert (cfg.live_dir / "u.pcm").stat().st_size == 2 * SR * 2   # its own quiet second + 1 s, nothing older
+    assert m.sessions["u"].started_at == now[0] - 2
+    # Speech straight after a gap gets no pre-roll at all.
+    m.ingest("v", SR, _pcm(1, 0.0))
+    now[0] += 3600
+    m.ingest("v", SR, _pcm(1, 0.5))
+    assert (cfg.live_dir / "v.pcm").stat().st_size == 2 * SR
+    assert m.sessions["v"].started_at == now[0] - 1
+
+
+def test_import_recording_is_queued_and_split(tmp_path):
+    import json
+
+    from omibridge.importer import parse_when, queue_recording
+
+    cfg = Config(data_dir=tmp_path, max_minutes=1, min_speech_seconds=8)
+    sr = 8000
+    rng = np.random.default_rng(0)
+    x = (rng.standard_normal(150 * sr) * 0.1).astype(np.float32)   # 2.5 minutes, 8 kHz
+    x[55 * sr: 56 * sr] = 0.0                                      # a quiet second to cut at
+    stereo = np.stack([x, x], axis=1)
+    t0 = parse_when("2026-11-11T09:30:00+00:00")
+    ids = queue_recording(cfg, stereo, sr, t0, "walk.wav", now=t0 + 9999)
+    assert len(ids) == 3 and len(set(ids)) == 3 and all(i.endswith("-import") for i in ids)
+    metas = [json.loads((cfg.queue_dir / f"{i}.json").read_text()) for i in ids]
+    assert metas[0]["started_at"] == t0 and metas[0]["sample_rate"] == 16000 and metas[0]["source"] == "walk.wav"
+    assert 55 <= metas[1]["started_at"] - t0 <= 56                 # cut inside the quiet second
+    total = sum((cfg.queue_dir / f"{i}.pcm").stat().st_size for i in ids)
+    assert total == 150 * 16000 * 2                                # nothing dropped, resampled to 16 kHz
+    # The same recording again gets new ids instead of overwriting.
+    again = queue_recording(cfg, stereo, sr, t0, "walk.wav", now=t0 + 9999)
+    assert not set(again) & set(ids)
+    with pytest.raises(ValueError):
+        queue_recording(cfg, x[: 3 * sr], sr)
+    assert parse_when("") is None and parse_when("1700000000") == 1700000000.0
+
+
+def test_summary_text_and_cleaning():
+    from omibridge.summarize import clean, transcript_text
+
+    doc = {"segments": [{"speaker": "Ana", "start": 65.2, "end": 70, "text": "hello there"},
+                        {"speaker": "unknown1", "start": 71, "end": 72, "text": ""},
+                        {"speaker": "unknown1", "start": 3725, "end": 3730, "text": "bye"}]}
+    assert transcript_text(doc) == "[1:05] Ana: hello there\n[62:05] unknown1: bye"
+    assert transcript_text({"segments": [{"speaker": "a", "start": 0, "text": ""}]}) == ""
+    long = {"segments": [{"speaker": "a", "start": i, "text": "word " * 20} for i in range(200)]}
+    cut = transcript_text(long, max_chars=2000)
+    assert len(cut) < 2100 and "middle left out" in cut
+    out = clean({"title": " Budget review. ", "overview": " ok ", "emoji": "📊", "category": "Sorcery",
+                 "action_items": ["send the sheet", " ", None]})
+    assert out == {"title": "Budget review", "overview": "ok", "emoji": "📊", "category": "other",
+                   "action_items": ["send the sheet"]}
+
+
+# -- optional GPU segmentation: fails safe -------------------------------------------
+class _FakeOnnxSeg:
+    window = 16
+    def scores(self, chunks):
+        return np.zeros((len(chunks), 3, 2), np.float32)
+    def binarize(self, y, speech_bias=0.0):
+        return y.argmax(-1)
+
+
+def test_gpu_off_by_default_and_fallbacks():
+    from omibridge.gpu_segmentation import maybe_gpu
+
+    onnx = _FakeOnnxSeg()
+    assert maybe_gpu(onnx, "cpu") is onnx                                   # default: untouched
+    def missing(_):
+        raise ImportError("No module named 'diarizen'")
+    assert maybe_gpu(onnx, "mps", loader=missing) is onnx                   # packages missing -> CPU
+
+
+def test_gpu_wrapper_batches_and_falls_back_on_error():
+    torch = pytest.importorskip("torch")
+    from omibridge.gpu_segmentation import MpsSegmentation
+
+    class Net(torch.nn.Module):
+        def forward(self, x):                      # (B, 1, W) -> (B, 3, 2)
+            return torch.ones(x.shape[0], 3, 2) * x.mean()
+    seg = MpsSegmentation(_FakeOnnxSeg(), Net(), device="cpu", batch=2)
+    out = seg.scores(np.ones((5, 16), np.float32))
+    assert out.shape == (5, 3, 2) and np.allclose(out, 1.0)               # 3 batches of <= 2
+    assert seg.window == 16 and seg.device_name == "cpu"                  # delegated to the ONNX model
+    class Broken(torch.nn.Module):
+        def forward(self, x):
+            raise RuntimeError("MPS out of memory")
+    seg = MpsSegmentation(_FakeOnnxSeg(), Broken(), device="cpu")
+    assert np.all(seg.scores(np.ones((2, 16), np.float32)) == 0)           # ONNX answer instead
+    assert seg.failed and seg.device_name == "cpu (GPU failed)"

@@ -24,11 +24,12 @@
   .row:first-child { border-top:0; }
   .name { font-weight:600; min-width:110px; } .unk { color:var(--unk); }
   .mut { color:var(--mut); font-size:13px; }
-  input[type=text] { background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 8px; font:inherit; width:150px; }
+  input[type=text], input[type=datetime-local] { background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 8px; font:inherit; width:150px; }
   button.b { background:var(--acc); color:#fff; border:0; border-radius:6px; padding:5px 10px; font:inherit; cursor:pointer; }
   button.g { background:transparent; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 10px; font:inherit; cursor:pointer; }
   .seg { padding:5px 0; } .seg b { margin-right:6px; } .seg .t { color:var(--mut); font-size:12px; margin-right:6px; font-variant-numeric: tabular-nums; }
   .err { color:#c0392b; }
+  ul { margin:4px 0 0; padding-left:20px; }
 </style>
 </head>
 <body>
@@ -38,6 +39,12 @@
     <div class="status" id="status">Loading…</div>
     <h2>Conversations</h2>
     <div id="list"></div>
+    <div class="card">
+      <div class="mut">Import a recording the bridge missed, such as one exported from the Omi app.</div>
+      <div class="row"><input type="file" id="if" accept="audio/*"></div>
+      <div class="row"><label class="mut" for="iw">Recorded at (optional)</label><input type="datetime-local" id="iw"></div>
+      <div class="row"><button class="b" id="ib">Import</button><span class="mut" id="im"></span></div>
+    </div>
     <h2>People</h2>
     <div class="card" id="people"></div>
     <div class="card">
@@ -71,7 +78,7 @@ async function refresh() {
   if (h.last_error) $("#status").innerHTML += `<div class="err">${esc(h.last_error)}</div>`;
   const convs = await api("/api/conversations");
   $("#list").innerHTML = convs.map((c) => `<button class="item ${c.id === current ? "sel" : ""}" data-id="${esc(c.id)}">
-      ${esc(when(c.started_at))} · ${fmt(c.duration)}
+      ${c.title ? `<b>${esc((c.emoji ? c.emoji + " " : "") + c.title)}</b><br>` : ""}${esc(when(c.started_at))} · ${fmt(c.duration)}
       <small>${esc(c.speakers.map((s) => s.name).join(", "))}</small><small>${esc(c.preview)}</small></button>`).join("")
     || `<div class="mut">Nothing yet.</div>`;
   const people = await api("/api/people");
@@ -80,10 +87,15 @@ async function refresh() {
       <button class="g" data-forget="${esc(p.name)}">Forget</button></div>`).join("") || `<div class="mut">Nobody enrolled yet.</div>`;
   $("#names").innerHTML = people.map((p) => `<option value="${esc(p.name)}">`).join("");
 }
+let shown = null;
 function show(d) {
-  current = d.id;
-  $("#detail").innerHTML = `<h1>${esc(when(d.started_at))}</h1>
-    <div class="status">${fmt(d.duration)} long, ${fmt(d.speech_seconds)} of speech${d.error ? ` · <span class="err">${esc(d.error)}</span>` : ""}</div>
+  current = d.id; shown = d;
+  const sm = d.summary;
+  $("#detail").innerHTML = `<h1>${esc(sm ? (sm.emoji ? sm.emoji + " " : "") + sm.title : when(d.started_at))}</h1>
+    <div class="status">${sm ? esc(when(d.started_at)) + " · " : ""}${fmt(d.duration)} long, ${fmt(d.speech_seconds)} of speech${d.error ? ` · <span class="err">${esc(d.error)}</span>` : ""}</div>
+    ${d.skipped ? `<div class="card"><div>Not transcribed: ${esc(d.skipped)}${d.presence_score != null ? ` (voice match ${d.presence_score})` : ""}. The audio is kept.</div>
+      <button class="b" data-transcribe="1">Transcribe it</button></div>` : ""}
+    ${sm ? `<div class="card"><div>${esc(sm.overview)}</div>${sm.action_items.length ? `<h2>Action items</h2><ul>${sm.action_items.map((a) => `<li>${esc(a)}</li>`).join("")}</ul>` : ""}</div>` : ""}
     <div class="card">${d.speakers.map((s, i) => `<div class="row">
         <span class="name ${s.known ? "" : "unk"}">${esc(s.name)}</span>
         <span class="mut">${fmt(s.speech_seconds)}${s.known ? ` · ${Math.round(s.confidence * 100)}%` : ""}</span>
@@ -101,14 +113,29 @@ document.addEventListener("click", async (e) => {
     else if (t.dataset.play) {
       const [a, b] = t.dataset.play.split(",");
       player.src = `/api/conversations/${current}/audio?start=${a}&end=${b}`; player.play();
+    } else if (t.dataset.transcribe) {
+      t.disabled = true; t.textContent = "Queued";
+      await api(`/api/conversations/${current}/transcribe`, { method: "POST" });
     } else if (t.dataset.label) {
       const person = document.querySelector(`[data-in="${t.dataset.i}"]`).value.trim();
       if (!person) return;
       show(await api(`/api/conversations/${current}/label`, { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ speaker: t.dataset.label, person, learn: true }) }));
+        body: JSON.stringify({ speaker: t.dataset.label, person, learn: true, clusters: shown.speakers[+t.dataset.i].clusters }) }));
       refresh();
     } else if (t.dataset.forget) {
       if (confirm(`Forget ${t.dataset.forget}'s voice?`)) { await api(`/api/people/${encodeURIComponent(t.dataset.forget)}`, { method: "DELETE" }); refresh(); }
+    } else if (t.id === "ib") {
+      const f = $("#if").files[0];
+      if (!f) return;
+      const fd = new FormData(); fd.append("file", f);
+      if ($("#iw").value) fd.append("started_at", $("#iw").value);
+      $("#im").textContent = "Uploading…";
+      try {
+        const r = await api("/api/import", { method: "POST", body: fd });
+        $("#im").textContent = `Queued ${r.queued.length} conversation${r.queued.length === 1 ? "" : "s"}. It appears here when processed.`;
+        $("#if").value = "";
+      } catch (err) { $("#im").textContent = ""; throw err; }
+      refresh();
     } else if (t.id === "eb") {
       const name = $("#en").value.trim(), f = $("#ef").files[0];
       if (!name || !f) return;

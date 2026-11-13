@@ -1,0 +1,11 @@
+--- a/app/lib/services/auth_service.dart	2026-11-11 11:27:12
++++ b/app/lib/services/auth_service.dart	2026-11-11 11:27:12
+@@ -825,7 +825,7 @@
+     // session after the UI has already reported failure.
+     try {
+       await http
+-          .get(Uri(scheme: 'http', host: Env.firebaseAuthEmulatorHost, port: Env.firebaseAuthEmulatorPort))
++          .get(Uri(scheme: Env.firebaseAuthEmulatorPort == 443 ? 'https' : 'http', host: Env.firebaseAuthEmulatorHost, port: Env.firebaseAuthEmulatorPort))
+           .timeout(const Duration(seconds: 8));
+     } catch (_) {
+       throw StateError(

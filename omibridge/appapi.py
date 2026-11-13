@@ -1,0 +1,895 @@
+"""The API the forked Omi app (dev flavor) talks to instead of Omi's servers.
+
+Only what a transcribe-and-summarize app needs: sign-in (appauth), onboarding
+status, the conversation list and detail, delete, "stop recording", the live
+listen socket and offline sync. Every other route answers 404, which the app
+treats as "nothing here" (empty memories, chat, apps, people lists ...).
+
+Served on the bridge's public port (the one the Cloudflare tunnel exposes) under
+/app/<OMIBRIDGE_APP_SECRET>/: without the secret every path is the same plain 404
+as any unknown address. Shares the bridge's session manager, job queue and
+engine, so live audio from the app is cut, transcribed, named and summarized
+exactly like audio from the webhook.
+"""
+from __future__ import annotations
+
+import asyncio
+import hmac
+import json
+import logging
+import re
+import shutil
+import threading
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse, Response
+
+from attrib.audio import SR
+
+from . import appaudio
+from .appauth import Tokens, custom_token_router, emulator_router
+from .config import Config
+from .sessions import SessionManager
+
+log = logging.getLogger("omibridge.appapi")
+
+CHUNK_SAMPLES = SR            # feed the session manager about one second at a time
+IDLE_FLUSH = 1.0              # seconds without audio before a partial chunk is handed on
+# The phone's silence gate does not send quiet audio. Before it resumes it says how much
+# it left out, and the bridge puts that much silence back, so a conversation's audio and
+# timestamps come out the same with the gate on or off.
+GAP_TYPE = "omiomy_silence_gap"
+MAX_GAP_COVERED = 6 * 3600    # most that one gap note may mark as "heard by the phone"
+
+
+def gap_seconds(text: str) -> float:
+    """Seconds of silence announced by a {"type": "omiomy_silence_gap", "ms": N} note, else 0."""
+    try:
+        m = json.loads(text)
+    except ValueError:
+        return 0.0
+    ms = m.get("ms") if isinstance(m, dict) and m.get("type") == GAP_TYPE else None
+    if isinstance(ms, bool) or not isinstance(ms, (int, float)) or not 0 < ms < float("inf"):
+        return 0.0
+    return ms / 1000
+COVERAGE_DAYS = 14
+
+CUTOVER_CONTROL = {"state": "legacy", "client_action": "none", "offline_queue_instruction": "none",
+                   "account_generation": 0, "product_traffic_allowed": True, "legacy_writes_allowed": True,
+                   "auth_bootstrap_reachable": True}
+
+
+def iso(ts: float | None) -> str | None:
+    return None if ts is None else datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def person_id(name: str) -> str:
+    return "p-" + re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def is_unknown(name: str) -> bool:
+    return name == "unknown" or bool(re.fullmatch(r"unknown\d*", name))
+
+
+# -- conversation.json -> the app's conversation shape ----------------------------
+def all_clusters(doc: dict) -> list[str]:
+    """Every voice cluster of a conversation, in an order that never changes for it."""
+    return sorted({l for s in doc.get("speakers", []) for l in s.get("clusters", [])})
+
+
+def speaker_ids(doc: dict) -> dict[str, int]:
+    """Speaker name -> the number the app knows that speaker by. It is the position of the
+    speaker's first cluster among all clusters, so a number the app got earlier still points at
+    the same voice after the gallery learned and names changed."""
+    order = all_clusters(doc)
+    return {s["name"]: order.index(min(s["clusters"])) if s.get("clusters") else len(order) + i
+            for i, s in enumerate(doc.get("speakers", []))}
+
+
+def voice_of(doc: dict, cluster: str | None) -> tuple[str, list[str]] | None:
+    """The speaker (name, clusters) a cluster belongs to on the stored page. For an unnamed
+    speaker that is the whole group the bridge merged; for a named one only the cluster itself,
+    so that correcting one voice never renames another that shares the name."""
+    for s in doc.get("speakers", []):
+        if cluster in s.get("clusters", []):
+            return s["name"], (list(s["clusters"]) if is_unknown(s["name"]) else [cluster])
+    return None
+
+
+def to_omi(doc: dict, wearer: str | None) -> dict:
+    """Map the bridge's conversation.json to the shape the Omi app parses
+    (app/lib/backend/schema/gen/conversation_wire.g.dart)."""
+    started = doc.get("started_at")
+    duration = doc.get("duration") or 0
+    ids = speaker_ids(doc)
+    segs = []
+    for i, s in enumerate(doc.get("segments", [])):
+        name = s.get("speaker") or "unknown"
+        known = not is_unknown(name)
+        is_user = bool(wearer) and name == wearer
+        sid = ids.get(name, len(all_clusters(doc)) + len(ids))
+        segs.append({"id": f"{doc['id']}-{i}", "text": s.get("text", ""), "start": float(s["start"]),
+                     "end": float(s["end"]), "is_user": is_user, "speaker": f"SPEAKER_{sid:02d}",
+                     "speaker_id": sid, "person_id": person_id(name) if known and not is_user else None,
+                     "speech_profile_processed": True})
+    summary = doc.get("summary") or {}
+    if doc.get("skipped") and not summary:
+        score = doc.get("presence_score")
+        summary = {"title": "Not transcribed: your voice not found", "emoji": "🔇", "category": "other",
+                   "overview": "This recording was kept but not transcribed because your voice was not found in it"
+                               + (f" (voice match {score})" if score is not None else "")
+                               + ". It can be transcribed from the review page."}
+    first = " ".join(s["text"] for s in segs[:3] if s["text"]).strip()
+    structured = {
+        "title": summary.get("title") or ("Conversation" if not first else first[:48]),
+        "overview": summary.get("overview") or first[:300],
+        "emoji": summary.get("emoji") or "💬",
+        "category": summary.get("category") or "other",
+        "action_items": [{"description": a, "completed": False} if isinstance(a, str) else a
+                         for a in summary.get("action_items") or []],
+        "events": [],
+    }
+    return {"id": doc["id"], "created_at": iso(started) or iso(time.time()), "started_at": iso(started),
+            "finished_at": iso(started + duration) if started is not None else None,
+            "structured": structured, "transcript_segments": segs, "status": "completed",
+            "discarded": bool(doc.get("skipped")), "source": "omi", "language": summary.get("language"),
+            "apps_results": [], "plugins_results": [], "photos": [], "audio_files": []}
+
+
+def processing_stub(cid: str, meta: dict) -> dict:
+    """A queued conversation that has not been processed yet."""
+    started = meta.get("started_at")
+    rate = meta.get("sample_rate") or SR
+    finished = started + meta.get("samples", 0) / rate if started is not None else None
+    return {"id": cid, "created_at": iso(started) or iso(time.time()), "started_at": iso(started),
+            "finished_at": iso(finished), "structured": {"title": "", "overview": "", "emoji": "⏳"},
+            "transcript_segments": [], "status": "processing", "discarded": False, "source": "omi"}
+
+
+class Coverage:
+    """Wall-clock spans of audio the bridge already has, so offline sync can
+    skip what was also heard live (and what an earlier upload already sent)."""
+
+    def __init__(self, path: Path, clock=time.time):
+        self.path, self.clock, self.lock = path, clock, threading.Lock()
+        try:
+            self.spans = [tuple(s) for s in json.loads(path.read_text())]
+        except (OSError, ValueError):
+            self.spans = []
+
+    def add(self, a: float, b: float) -> None:
+        with self.lock:
+            spans = sorted(self.spans + [(a, b)])
+            merged: list[tuple[float, float]] = []
+            for s, e in spans:
+                if merged and s <= merged[-1][1] + 1.0:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+                else:
+                    merged.append((s, e))
+            cutoff = self.clock() - COVERAGE_DAYS * 86400
+            self.spans = [s for s in merged if s[1] >= cutoff]
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self.spans))
+            tmp.replace(self.path)
+
+    def covered(self, a: float, b: float) -> float:
+        """Fraction of [a, b) already covered."""
+        if b <= a:
+            return 1.0
+        with self.lock:
+            got = sum(max(0.0, min(b, e) - max(a, s)) for s, e in self.spans)
+        return min(1.0, got / (b - a))
+
+
+class AppAPI:
+    def __init__(self, cfg: Config, bridge: FastAPI, clock=time.time):
+        self.cfg, self.clock = cfg, clock
+        self.idle_flush = IDLE_FLUSH
+        self.sessions: SessionManager = bridge.state.sessions
+        self.engine = bridge.state.engine
+        self.enqueue = bridge.state.enqueue
+        self.tokens = Tokens(cfg.app_secret, cfg.app_uid, clock)
+        self.coverage = Coverage(cfg.app_dir / "coverage.json", clock)
+        self.sockets: dict[str, set] = {}       # session key -> {(websocket, loop)}
+        self.undelivered: dict[str, str] = {}   # session key -> last finished conversation not yet shown
+        self.jobs: dict[str, dict] = {}
+        self.lock = threading.Lock()
+        self.label_lock = threading.Lock()
+        if not cfg.wearer:
+            try:
+                cfg.wearer = json.loads((cfg.app_dir / "wearer.json").read_text())["name"] or None
+            except (OSError, ValueError, KeyError):
+                pass
+        bridge.state.listeners.append(self)
+        self.app = self._build()
+        # The public port: the webhook, the sign-in emulator calls at the root, and this API
+        # under the secret path, behind size caps and a limiter on failed checks.
+        self.limiter = FailureLimiter(clock)
+        bridge.state.public.include_router(emulator_router(self.tokens, cfg.app_dir / "profile.json"))
+        self.public = PublicGate(bridge.state.public, self.app, cfg.app_secret, self.limiter)
+
+    # A session key per app account, separate from webhook users.
+    def key(self, uid: str) -> str:
+        return f"app-{uid}"
+
+    # -- bridge events -> connected phones ------------------------------------
+    def _meta_uid(self, cid: str) -> str | None:
+        for p in (self.cfg.queue_dir / f"{cid}.json", self.cfg.conv_dir / cid / "meta.json"):
+            try:
+                return json.loads(p.read_text()).get("uid")
+            except (OSError, ValueError):
+                continue
+        return None
+
+    def _send(self, key: str, message: dict) -> bool:
+        sent = False
+        for ws, loop in list(self.sockets.get(key, ())):
+            asyncio.run_coroutine_threadsafe(ws.send_text(json.dumps(message)), loop)
+            sent = True
+        return sent
+
+    def queued(self, cid: str) -> None:
+        key = self._meta_uid(cid)
+        if key and key.startswith("app-"):
+            meta = json.loads((self.cfg.queue_dir / f"{cid}.json").read_text())
+            self._send(key, {"type": "memory_processing_started", "memory": processing_stub(cid, meta)})
+
+    def processed(self, cid: str, doc: dict) -> None:
+        key = self._meta_uid(cid)
+        if not (key and key.startswith("app-")):
+            return
+        if not self._send(key, {"type": "memory_created", "memory": to_omi(doc, self.cfg.wearer), "messages": []}):
+            self.undelivered[key] = cid
+
+    # -- helpers ----------------------------------------------------------------
+    def conv_dir(self, cid: str) -> Path | None:
+        p = (self.cfg.conv_dir / cid).resolve()
+        if p.parent == self.cfg.conv_dir.resolve() and (p / "conversation.json").exists():
+            return p
+        return None
+
+    def get(self, cid: str) -> dict | None:
+        p = self.conv_dir(cid)
+        if p is not None:
+            return to_omi(json.loads((p / "conversation.json").read_text()), self.cfg.wearer)
+        q = (self.cfg.queue_dir / f"{cid}.json").resolve()
+        if q.parent == self.cfg.queue_dir.resolve() and q.exists():
+            return processing_stub(cid, json.loads(q.read_text()))
+        return None
+
+    def all(self) -> list[dict]:
+        out = [to_omi(json.loads(p.read_text()), self.cfg.wearer)
+               for p in self.cfg.conv_dir.glob("*/conversation.json")]
+        for q in self.cfg.queue_dir.glob("*.json"):
+            if not (self.cfg.conv_dir / q.stem / "conversation.json").exists():
+                out.append(processing_stub(q.stem, json.loads(q.read_text())))
+        return sorted(out, key=lambda c: c["started_at"] or c["created_at"], reverse=True)
+
+    # -- naming speakers from the app ---------------------------------------------
+    def created_people(self) -> list[str]:
+        try:
+            return list(json.loads((self.cfg.app_dir / "people.json").read_text()))
+        except (OSError, ValueError):
+            return []
+
+    def known_people(self) -> list[str]:
+        names = [p["name"] for p in self.engine.people()] + self.created_people()
+        return [n for n in dict.fromkeys(names) if n != self.cfg.wearer]
+
+    def create_person(self, name: str) -> str:
+        name = " ".join(name.split())[:80]
+        if not name or is_unknown(name.lower()):
+            raise HTTPException(400, "invalid name")
+        with self.label_lock:
+            have = self.created_people()
+            for n in have + [p["name"] for p in self.engine.people()]:
+                if n.lower() == name.lower():
+                    return n
+            self.cfg.app_dir.mkdir(parents=True, exist_ok=True)
+            (self.cfg.app_dir / "people.json").write_text(json.dumps(have + [name]))
+            return name
+
+    def wearer_name(self) -> str:
+        """The name "this is me" files the wearer's voice under: OMIBRIDGE_WEARER, else the
+        app's display name (onboarding), else "Me". Chosen once and kept."""
+        if not self.cfg.wearer:
+            try:
+                name = json.loads((self.cfg.app_dir / "profile.json").read_text()).get("displayName") or ""
+            except (OSError, ValueError):
+                name = ""
+            self.cfg.wearer = " ".join(name.split())[:80] or "Me"
+            self.cfg.app_dir.mkdir(parents=True, exist_ok=True)
+            (self.cfg.app_dir / "wearer.json").write_text(json.dumps({"name": self.cfg.wearer}))
+        return self.cfg.wearer
+
+    def assign(self, cid: str, assign_type: str, value: str | None, speaker_id: int | None = None,
+               segment_ids: list[str] | None = None, segment_index: int | None = None) -> dict:
+        """Omi's manual speaker assignment, mapped onto the bridge's labeling. The bridge names
+        whole voices, so every line of a chosen line's voice gets the name, and the voice is
+        learned (the gallery gets its voiceprints) so later conversations recognize it."""
+        if assign_type not in ("is_user", "person_id", "not_a_person"):
+            raise HTTPException(400, "Invalid assign type")
+        p = self.conv_dir(cid)
+        if p is None:
+            raise HTTPException(404, "no such conversation")
+        value = None if value in (None, "null", "") else value
+        doc = json.loads((p / "conversation.json").read_text())
+        order = all_clusters(doc)
+        segs = doc.get("segments", [])
+
+        def line_cluster(seg: dict) -> str | None:
+            if "cluster" in seg:
+                return seg["cluster"]
+            # A page stored before lines carried their cluster: go by the name it shows.
+            return next((min(s["clusters"]) for s in doc.get("speakers", [])
+                         if s["name"] == seg.get("speaker") and s.get("clusters")), None)
+
+        picked: list[str | None] = []
+        if speaker_id is not None:
+            if not 0 <= speaker_id < len(order):
+                raise HTTPException(409, "stale speaker")
+            picked.append(order[speaker_id])
+        if segment_index is not None:
+            if not 0 <= segment_index < len(segs):
+                raise HTTPException(404, "no such segment")
+            picked.append(line_cluster(segs[segment_index]))
+        for sid in segment_ids or []:
+            pre, _, idx = sid.rpartition("-")
+            if pre != cid or not idx.isdigit() or int(idx) >= len(segs):
+                raise HTTPException(404, f"no such segment {sid!r}")
+            picked.append(line_cluster(segs[int(idx)]))
+        if not picked:
+            raise HTTPException(400, "nothing selected")
+        # name shown -> clusters to name, each voice once
+        voices: dict[str, list[str]] = {}
+        for c in dict.fromkeys(picked):
+            v = voice_of(doc, c)
+            if v is None:
+                raise HTTPException(409, "stale speaker")
+            voices.setdefault(v[0], [])
+            voices[v[0]] += [l for l in v[1] if l not in voices[v[0]]]
+        person = None
+        if assign_type == "is_user" and str(value).lower() in ("true", "1"):
+            person = self.wearer_name()
+        elif assign_type == "person_id" and value:
+            person = next((n for n in self.known_people() if person_id(n) == value), None)
+            if person is None:
+                raise HTTPException(404, "no such person")
+        if person is not None:
+            with self.label_lock:
+                for shown, clusters in voices.items():
+                    if shown != person:
+                        try:
+                            self.engine.label(cid, shown, person, clusters=clusters)
+                        except KeyError:
+                            raise HTTPException(409, "stale speaker")
+            log.info("app named a voice in %s", cid)
+            # Names in the summary too, without holding up the app.
+            threading.Thread(target=self._resummarize, args=(cid,), daemon=True).start()
+            rerender = getattr(self.engine, "rerender_all", None)
+            if rerender:
+                threading.Thread(target=rerender, kwargs={"skip": cid}, daemon=True).start()
+        # Un-assigning and "not a person" have no counterpart in the bridge yet: nothing changes.
+        return self.get(cid)
+
+    def _resummarize(self, cid: str) -> None:
+        try:
+            self.engine.summarize(cid)
+        except Exception:
+            log.exception("summary after naming failed for %s", cid)
+
+    # -- offline sync -------------------------------------------------------------
+    def run_sync(self, job_id: str, files: list[tuple[str, bytes]]) -> dict:
+        """Decode the uploaded files, drop what the bridge already has, and cut the
+        rest into conversations the same way live audio is cut."""
+        decoded = []
+        errors = []
+        for name, data in files:
+            try:
+                start, pcm = appaudio.decode_wal(name, data)
+            except Exception as e:
+                errors.append(f"{name}: {e}")
+                continue
+            if len(pcm):
+                decoded.append((start, pcm))
+        decoded.sort(key=lambda t: t[0])
+        clock = {"now": 0.0}
+        mgr = SessionManager(self.cfg, self.engine.speech_seconds, clock=lambda: clock["now"])
+        key = self.key(self.cfg.app_uid).replace("app-", "sync-") + "-" + job_id[:8]
+        new = []
+        for start, pcm in decoded:
+            for i in range(0, len(pcm), CHUNK_SAMPLES):
+                chunk = pcm[i: i + CHUNK_SAMPLES]
+                a = start + i / SR
+                b = a + len(chunk) / SR
+                # Close what went quiet before this chunk starts; otherwise a recording made
+                # an hour later would be appended to the previous conversation.
+                clock["now"] = a
+                new += mgr.sweep()
+                clock["now"] = b
+                if self.coverage.covered(a, b) < 0.5:
+                    res = mgr.ingest(key, SR, chunk.astype("<i2").tobytes())
+                    if res.get("id"):
+                        new.append(res["id"])
+                new += mgr.sweep()
+            self.coverage.add(start, start + len(pcm) / SR)
+        clock["now"] += self.cfg.idle_seconds + 1
+        new += mgr.sweep()
+        for cid in new:
+            self.enqueue(cid)
+        total = sum(len(p) for _, p in decoded) // CHUNK_SAMPLES + 1
+        log.info("sync %s: %d files, %d conversations, %d errors", job_id, len(files), len(new), len(errors))
+        # Undecodable files are terminal for the app (it would retry forever otherwise),
+        # so they count as handled.
+        return {"new_memories": new, "updated_memories": [], "failed_segments": 0,
+                "total_segments": total, "errors": errors}
+
+    # -- the FastAPI app -------------------------------------------------------------
+    def _build(self) -> FastAPI:
+        cfg, tokens = self.cfg, self.tokens
+        app = FastAPI(title="omi-omy app API", docs_url=None, redoc_url=None, openapi_url=None)
+        app.include_router(custom_token_router(tokens))
+
+        def user(authorization: str | None) -> str:
+            try:
+                return tokens.check_header(authorization)
+            except PermissionError as e:
+                raise HTTPException(401, str(e))
+
+        @app.api_route("/v1/health", methods=["GET", "HEAD"])   # the app's connectivity probe uses HEAD
+        def health():
+            return {"status": "ok"}
+
+        @app.get("/v1/users/onboarding")
+        def onboarding(authorization: str | None = Header(None)):
+            user(authorization)
+            return {"completed": True, "acquisition_source": "", "device_onboarding_completed": True}
+
+        @app.patch("/v1/users/onboarding")
+        def onboarding_update(authorization: str | None = Header(None)):
+            user(authorization)
+            return {"status": "ok"}
+
+        # The app's primary language (onboarding and Settings > Language). Stored so the app
+        # reads back what it set; the bridge's transcription does not use it.
+        lang_file = cfg.app_dir / "language.json"
+
+        @app.get("/v1/users/language")
+        def get_language(authorization: str | None = Header(None)):
+            user(authorization)
+            try:
+                return {"language": json.loads(lang_file.read_text()).get("language") or "en"}
+            except (OSError, ValueError):
+                return {"language": "en"}
+
+        @app.patch("/v1/users/language")
+        async def set_language(request: Request, authorization: str | None = Header(None)):
+            user(authorization)
+            try:
+                lang = (await request.json()).get("language")
+            except Exception:
+                lang = None
+            if not isinstance(lang, str) or not 1 <= len(lang) <= 35:
+                raise HTTPException(400, "language must be a language code")
+            cfg.app_dir.mkdir(parents=True, exist_ok=True)
+            lang_file.write_text(json.dumps({"language": lang}))
+            return {"status": "ok", "message": "", "single_language_mode": False}
+
+        @app.put("/v1/users/time-zone")
+        def set_time_zone(authorization: str | None = Header(None)):
+            # Accepted and ignored: the bridge keeps the Mac's time zone.
+            user(authorization)
+            return {"status": "ok"}
+
+        @app.get("/v1/account/cutover/control")
+        def cutover(authorization: str | None = Header(None)):
+            user(authorization)
+            return CUTOVER_CONTROL
+
+        @app.get("/v1/conversations")
+        def conversations(authorization: str | None = Header(None), limit: int = 50, offset: int = 0,
+                          statuses: str = "", include_discarded: bool = False, starred: bool = False,
+                          start_date: str | None = None, end_date: str | None = None,
+                          folder_id: str | None = None):
+            user(authorization)
+            if starred or folder_id:
+                return []
+            wanted = {s for s in statuses.split(",") if s}
+            items = [c for c in self.all() if not wanted or c["status"] in wanted]
+            if not include_discarded:
+                # Recordings the presence filter left untranscribed are Omi's "discarded": out of
+                # the list unless the app asks for them.
+                items = [c for c in items if not c.get("discarded")]
+
+            def parse(text: str) -> datetime:
+                d = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+            def when(c):
+                return parse(c["started_at"] or c["created_at"])
+
+            try:
+                lo = parse(start_date) if start_date else None
+                hi = parse(end_date) if end_date else None
+            except ValueError:
+                raise HTTPException(400, "bad date")
+            if lo:
+                items = [c for c in items if when(c) >= lo]
+            if hi:
+                items = [c for c in items if when(c) <= hi]
+            return items[offset: offset + max(0, min(limit, 500))]
+
+        @app.get("/v1/conversations/{cid}")
+        def conversation(cid: str, authorization: str | None = Header(None)):
+            user(authorization)
+            c = self.get(cid)
+            if c is None:
+                raise HTTPException(404, "no such conversation")
+            return c
+
+        @app.delete("/v1/conversations/{cid}")
+        def delete(cid: str, authorization: str | None = Header(None)):
+            user(authorization)
+            p = self.conv_dir(cid)
+            if p is None:
+                raise HTTPException(404, "no such conversation")
+            cfg.trash_dir.mkdir(parents=True, exist_ok=True)
+            dest = cfg.trash_dir / cid
+            if dest.exists():
+                dest = cfg.trash_dir / f"{cid}-{int(self.clock())}"
+            shutil.move(str(p), str(dest))
+            log.info("moved %s to the trash", cid)
+            return Response(status_code=204)
+
+        @app.post("/v1/conversations")
+        def stop(authorization: str | None = Header(None)):
+            """The app's "stop" button: end the conversation being recorded now."""
+            uid = user(authorization)
+            cid = self.sessions.close(self.key(uid))
+            if cid is None:
+                raise HTTPException(404, "nothing is being recorded")
+            self.enqueue(cid)
+            return {"conversation": self.get(cid), "messages": []}
+
+        @app.get("/v1/users/people")
+        def people(authorization: str | None = Header(None)):
+            # Named voices from the bridge's gallery, so transcript lines can show real names.
+            user(authorization)
+            now = iso(self.clock())
+            return [{"id": person_id(n), "name": n, "created_at": now, "updated_at": now, "speech_samples": []}
+                    for n in self.known_people()]
+
+        @app.post("/v1/users/people")
+        async def create_person(request: Request, authorization: str | None = Header(None)):
+            # Idempotent by name, like Omi's. The person gets a voice once a speaker is assigned.
+            user(authorization)
+            try:
+                name = (await request.json()).get("name")
+            except ValueError:
+                raise HTTPException(400, "invalid body")
+            if not isinstance(name, str):
+                raise HTTPException(400, "invalid name")
+            n = self.create_person(name)
+            now = iso(self.clock())
+            return {"id": person_id(n), "name": n, "created_at": now, "updated_at": now, "speech_samples": []}
+
+        async def body_json(request: Request) -> dict:
+            raw = await request.body()
+            try:
+                b = json.loads(raw) if raw.strip() else {}
+            except ValueError:
+                raise HTTPException(400, "invalid body")
+            return b if isinstance(b, dict) else {}
+
+        @app.patch("/v1/conversations/{cid}/assign-speaker/{speaker_id}")
+        async def assign_speaker(cid: str, speaker_id: int, request: Request, assign_type: str,
+                                 value: str | None = None, authorization: str | None = Header(None)):
+            user(authorization)
+            b = await body_json(request)
+            return await run_in_threadpool(self.assign, cid, assign_type, value, speaker_id,
+                                           None if b.get("segment_ids") is None else list(b["segment_ids"]))
+
+        @app.patch("/v1/conversations/{cid}/segments/assign-bulk")
+        async def assign_bulk(cid: str, request: Request, authorization: str | None = Header(None)):
+            user(authorization)
+            b = await body_json(request)
+            ids = b.get("segment_ids")
+            if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+                raise HTTPException(422, "segment_ids required")
+            return await run_in_threadpool(self.assign, cid, str(b.get("assign_type")), b.get("value"), None, ids)
+
+        @app.patch("/v1/conversations/{cid}/segments/{idx}/assign")
+        async def assign_segment(cid: str, idx: int, assign_type: str, value: str | None = None,
+                                 authorization: str | None = Header(None)):
+            user(authorization)
+            return await run_in_threadpool(self.assign, cid, assign_type, value, None, None, idx)
+
+        # -- offline sync ----------------------------------------------------------
+        @app.post("/v2/sync-local-files")
+        async def sync_local_files(request: Request, files: list[UploadFile] = File(...),
+                                   authorization: str | None = Header(None)):
+            user(authorization)
+            payload = []
+            for f in files:
+                name = f.filename or ""
+                if not name.endswith(".bin") or "/" in name or "\\" in name:
+                    raise HTTPException(400, f"invalid file name {name!r}")
+                try:
+                    appaudio.wal_start_time(name)
+                except ValueError:
+                    raise HTTPException(400, f"invalid file name {name!r}")
+                payload.append((name, await f.read()))
+            job_id = uuid.uuid4().hex
+            job = {"job_id": job_id, "status": "processing", "total_files": len(payload),
+                   "total_segments": len(payload), "processed_segments": 0, "successful_segments": 0,
+                   "failed_segments": 0, "result": None, "error": None, "poll_after_ms": 2000}
+            with self.lock:
+                self.jobs[job_id] = job
+
+            def work():
+                try:
+                    res = self.run_sync(job_id, payload)
+                    job.update(status="completed", result=res, total_segments=res["total_segments"],
+                               processed_segments=res["total_segments"],
+                               successful_segments=res["total_segments"])
+                except Exception as e:
+                    log.exception("sync %s failed", job_id)
+                    job.update(status="failed", error=str(e))
+
+            threading.Thread(target=work, daemon=True).start()
+            return JSONResponse({k: job[k] for k in ("job_id", "status", "total_files", "total_segments",
+                                                     "poll_after_ms")} | {"lane": "fresh"}, status_code=202)
+
+        @app.get("/v2/sync-local-files/{job_id}")
+        def sync_job(job_id: str, authorization: str | None = Header(None)):
+            user(authorization)
+            job = self.jobs.get(job_id)
+            if job is None:
+                raise HTTPException(404, "no such job")   # the app uploads again
+            return job
+
+        # -- live audio --------------------------------------------------------------
+        @app.websocket("/v4/listen")
+        async def listen(ws: WebSocket, codec: str = "opus", sample_rate: int = SR):
+            try:
+                uid = tokens.check_header(ws.headers.get("authorization"))
+            except PermissionError as e:
+                log.warning("listen refused: %s", e)
+                await ws.close(code=1008)
+                return
+            try:
+                decoder = appaudio.LiveDecoder(codec, sample_rate)
+            except ValueError as e:
+                await ws.close(code=1003, reason=str(e))
+                return
+            await ws.accept()
+            key = self.key(uid)
+            entry = (ws, asyncio.get_running_loop())
+            self.sockets.setdefault(key, set()).add(entry)
+            log.info("listen socket open (codec %s)", codec)
+            await ws.send_text(json.dumps({"type": "service_status", "status": "ready"}))
+            if key in self.undelivered:
+                await ws.send_text(json.dumps({"type": "last_memory", "memory_id": self.undelivered.pop(key)}))
+            buf: list[np.ndarray] = []
+            have = 0
+
+            async def feed(pcm: np.ndarray):
+                res = await run_in_threadpool(self.sessions.ingest, key, SR, pcm.astype("<i2").tobytes())
+                if res.get("id"):
+                    self.enqueue(res["id"])
+
+            async def flush():
+                nonlocal buf, have
+                if not have:
+                    return
+                pcm = np.concatenate(buf)
+                buf, have = [], 0
+                end = self.clock()
+                self.coverage.add(end - len(pcm) / SR, end)
+                await feed(pcm)
+
+            async def fill_gap(seconds: float):
+                # The phone was listening for this long and sent nothing because it was quiet.
+                await flush()
+                end = self.clock()
+                self.coverage.add(end - min(seconds, MAX_GAP_COVERED), end)
+                with self.sessions.lock:
+                    recording = key in self.sessions.sessions
+                # Silence between conversations is nothing. Inside one, put it back; a gap as
+                # long as the idle timeout has already ended the conversation.
+                if recording:
+                    await feed(np.zeros(int(min(seconds, self.cfg.idle_seconds) * SR), np.int16))
+
+            # One pending receive at a time, never cancelled while the socket lives: a timeout
+            # only means "no audio for a moment", and then a partial chunk is handed on so the
+            # end of a sentence is not held back until the next one starts.
+            pending: asyncio.Future | None = None
+            try:
+                while True:
+                    if pending is None:
+                        pending = asyncio.ensure_future(ws.receive())
+                    if have:
+                        await asyncio.wait({pending}, timeout=self.idle_flush)
+                        if not pending.done():
+                            await flush()
+                            continue
+                    msg, pending = await pending, None
+                    if msg["type"] == "websocket.disconnect":
+                        break
+                    if msg.get("bytes") is not None:
+                        x = decoder.decode(msg["bytes"])
+                        if len(x):
+                            buf.append(x)
+                            have += len(x)
+                        if have >= CHUNK_SAMPLES:
+                            await flush()
+                    elif msg.get("text"):
+                        text = msg["text"]
+                        if text == "ping":
+                            await ws.send_text("pong")
+                        elif GAP_TYPE in text:
+                            gap = gap_seconds(text)
+                            if gap:
+                                await fill_gap(gap)
+                        # Other JSON control messages (client_state, capture_evidence_frame,
+                        # suggested_transcript ...) are not needed here.
+            except WebSocketDisconnect:
+                pass
+            finally:
+                if pending is not None:
+                    pending.cancel()
+                await flush()
+                self.sockets.get(key, set()).discard(entry)
+                log.info("listen socket closed")
+
+        @app.api_route("/{path:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"])
+        def everything_else(path: str):
+            # Memories, chat, apps, subscriptions ...: switched off. 404 reads as "none" in the app.
+            raise HTTPException(404, "not available on this backend")
+
+        return app
+
+
+# -- the public port's front door ----------------------------------------------------
+FAIL_WINDOW = 600      # seconds
+FAIL_LIMIT = 30        # failed checks per address in the window before it is blocked
+BLOCK_SECONDS = 900
+MAX_BODY = {"/v2/sync-local-files": 128 * 2**20, "/omi/audio/": 2**20}
+DEFAULT_MAX_BODY = 256 * 2**10
+
+
+class FailureLimiter:
+    """Counts failed secret/token checks per client address; too many blocks it for a while."""
+
+    def __init__(self, clock=time.time):
+        self.clock, self.lock = clock, threading.Lock()
+        self.fails: dict[str, list[float]] = {}
+        self.blocked_until: dict[str, float] = {}
+
+    def fail(self, ip: str) -> None:
+        now = self.clock()
+        with self.lock:
+            recent = [t for t in self.fails.get(ip, []) if t > now - FAIL_WINDOW] + [now]
+            self.fails[ip] = recent
+            if len(recent) >= FAIL_LIMIT:
+                self.blocked_until[ip] = now + BLOCK_SECONDS
+                self.fails.pop(ip, None)
+                log.warning("blocked an address for %d minutes after repeated failed checks", BLOCK_SECONDS // 60)
+            if len(self.fails) > 10000:          # bound memory under a flood of addresses
+                self.fails.clear()
+
+    def blocked(self, ip: str) -> bool:
+        until = self.blocked_until.get(ip)
+        if until is None:
+            return False
+        if until <= self.clock():
+            self.blocked_until.pop(ip, None)
+            return False
+        return True
+
+
+def client_ip(scope) -> str:
+    for k, v in scope.get("headers", []):
+        if k == b"cf-connecting-ip":
+            return v.decode("latin-1").strip()
+    c = scope.get("client")
+    return c[0] if c else "?"
+
+
+def body_cap(path: str) -> int:
+    for prefix, cap in MAX_BODY.items():
+        if path.startswith(prefix):
+            return cap
+    return DEFAULT_MAX_BODY
+
+
+class PublicGate:
+    """ASGI front for the public port.
+
+    /app/<secret>/<rest> goes to the app API as /<rest> (constant-time secret check).
+    Anything else, including /app/<wrong>/..., goes to the public app unchanged, so a
+    wrong secret gets exactly the 404 an unknown path gets. Failed checks without the
+    secret (a wrong secret, a wrong webhook token, refused sign-in tokens) count against
+    the client's address. A request that carries the right secret is never counted and
+    never blocked: the phone must not be locked out of its own backend, least of all
+    while it is recording, because of a stale token or of someone else on its network.
+    """
+
+    def __init__(self, public, api, secret: str, limiter: FailureLimiter):
+        self.public, self.api, self.limiter = public, api, limiter
+        self.secret = secret.encode()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            return await self.public(scope, receive, send)
+        ip = client_ip(scope)
+        path = scope["path"]
+        target = self.public
+        wrong_secret = False
+        if path.startswith("/app/"):
+            seg, _, tail = path[5:].partition("/")
+            if hmac.compare_digest(seg.encode(), self.secret):
+                tail = "/" + tail
+                scope = dict(scope, path=tail, raw_path=tail.encode(), root_path="")
+                target = self.api
+            else:
+                wrong_secret = True
+        trusted = target is self.api
+        if not trusted and self.limiter.blocked(ip):
+            if scope["type"] == "http":
+                await send({"type": "http.response.start", "status": 429,
+                            "headers": [(b"content-type", b"text/plain")]})
+                await send({"type": "http.response.body", "body": b"Too many failed attempts"})
+            else:
+                await send({"type": "websocket.close", "code": 1008})
+            return
+        if wrong_secret:
+            self.limiter.fail(ip)
+        inner_path = scope["path"]
+
+        if scope["type"] == "http":
+            cap = body_cap(inner_path)
+            length = next((v for k, v in scope.get("headers", []) if k == b"content-length"), None)
+            if length is not None and length.isdigit() and int(length) > cap:
+                await send({"type": "http.response.start", "status": 413, "headers": []})
+                await send({"type": "http.response.body", "body": b""})
+                return
+            seen = 0
+
+            async def capped_receive():
+                nonlocal seen
+                msg = await receive()
+                if msg["type"] == "http.request":
+                    seen += len(msg.get("body", b""))
+                    if seen > cap:
+                        raise ValueError("request body too large")
+                return msg
+
+            emulator = inner_path.startswith(("/identitytoolkit.googleapis.com/", "/securetoken.googleapis.com/",
+                                              "/www.googleapis.com/"))
+
+            async def watching_send(msg):
+                if msg["type"] == "http.response.start":
+                    st = msg["status"]
+                    if not trusted and (st in (401, 403) or (emulator and st == 400)):
+                        self.limiter.fail(ip)
+                    if trusted or emulator:
+                        # One line per app request; the secret is already stripped from the path.
+                        log.info("app %s %s -> %d", scope["method"], inner_path, st)
+                await send(msg)
+
+            return await target(scope, capped_receive, watching_send)
+
+        async def watching_ws_send(msg):
+            if msg["type"] in ("websocket.accept", "websocket.close") and trusted:
+                log.info("app websocket %s %s", inner_path, msg["type"].split(".")[1])
+            await send(msg)
+
+        return await target(scope, receive, watching_ws_send)

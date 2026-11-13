@@ -19,7 +19,8 @@ pendant energy gate -> phone Silero VAD -> pack speech -> MAI Transcribe 2 (no d
 | `attrib/vad.py` | `EnergyGate` (cheap pendant gate), `SileroVAD` (phone), `pack` + `TimeMap` (speech-only upload, timestamps mapped back) |
 | `attrib/transcribe.py` | MAI Transcribe 2 client (OpenRouter), word timestamps, long audio cut at quiet points |
 | `omibridge/` | Service for the Omi app: audio webhook, conversation cutting, review page, voice naming |
-| `attrib/chunkdiar.py` | Diarizer: 10 s segmentation windows, one TitaNet voiceprint per window speaker, clustering with "same window = different people" constraints |
+| `attrib/maidiar.py` | Who spoke when from MAI Transcribe 2's diarization (the bridge's default): words to turns, voiceprints from each speaker's clearest speech, speakers linked across upload pieces |
+| `attrib/chunkdiar.py` | Local diarizer (fallback, `OMIBRIDGE_DIARIZER=local`): 10 s segmentation windows, one TitaNet voiceprint per window speaker, clustering with "same window = different people" constraints |
 | `attrib/diarize.py` | sherpa-onnx diarizer (baseline) and per-speaker voiceprint pooling |
 | `attrib/identify.py` | Gallery, per-sample adaptive s-norm, calendar priors, open-set threshold, unknown-voice tracking |
 | `attrib/align.py` | Words to speakers by timestamp overlap |
@@ -46,8 +47,9 @@ The transcription client reads `OPENROUTER_API_KEY` and calls
 Runs next to the stock Omi app, no fork needed. The app's developer setting
 "Realtime audio bytes" posts the pendant's raw audio to the bridge. The bridge
 cuts it into conversations (closed after 2 minutes without speech), transcribes
-with MAI Transcribe 2 through OpenRouter, diarizes with DiariZen + TitaNet, and
-names the speakers it knows. A local review page lists conversations, plays a
+with MAI Transcribe 2 through OpenRouter (which also says who spoke when), and
+names the speakers it knows from TitaNet voiceprints of their clearest speech, and writes a short summary (title, overview, action
+items) with an LLM through the same OpenRouter key. A local review page lists conversations, plays a
 clip of each unknown voice, and lets you name it. Naming a voice adds it to the
 gallery, so later conversations recognize that person.
 
@@ -56,6 +58,9 @@ scripts/install_mac.sh              # venv, models, .env with a random webhook t
 # add OPENROUTER_API_KEY to .env
 .venv/bin/python -m omibridge       # webhook on :8377, review page on http://127.0.0.1:8378/
 scripts/install_mac.sh --launchd    # optional: keep it running with launchd
+zsh setup-tunnel.sh                  # this Mac mini: tunnel omi.gabrielprice.com -> :8377 plus local.omi-bridge.* login agents
+zsh scripts/set_keys.sh             # enter OPENROUTER_API_KEY without it showing anywhere
+zsh bridgectl.sh status             # status | start | stop | restart | logs
 .venv/bin/python -m omibridge.replay data/sample.wav --speed 15   # test without a pendant
 ```
 
@@ -64,6 +69,59 @@ one to expose (for example through a Cloudflare tunnel) so the phone can reach
 it. Port 8378 has the review page and the transcripts, and listens on loopback
 only. In the Omi app set Settings > Developer Mode > Realtime audio bytes to
 `https://<your-host>/omi/audio/<OMIBRIDGE_TOKEN>`.
+
+Omi forwards live audio only. What the pendant stored while the phone was away
+is transcribed by Omi but never reaches the webhook. To bring such a recording
+in, turn on stored recordings in the Omi app, export the conversation's audio,
+and use "Import a recording" on the review page (`POST /api/import` on the
+private port). Recordings longer than `OMIBRIDGE_MAX_MINUTES` are cut at quiet
+points into several conversations.
+
+Presence filter (`OMIBRIDGE_PRESENCE`, default `off`): with `skip`, a conversation in which the
+enrolled wearer's voice (gallery entries named like `OMIBRIDGE_WEARER`, any case) is not found is
+kept but not transcribed: no MAI cost, the audio stays, the review page shows "Not transcribed:
+your voice not found" with the match score, the app gets it as a discarded conversation (out of
+its list unless it asks with `include_discarded`), and "Transcribe it" on the review page
+(`POST /api/conversations/<id>/transcribe`) queues it normally. Never skips while no wearer is
+enrolled. The check (`omibridge/presence.py`: pyannote speech, TitaNet on 3 s pieces, the
+bridge's own normalised score, best three) runs before MAI, about 0.5 s per audio minute.
+`OMIBRIDGE_PRESENCE_THRESHOLD` (default 1.5) is the score under which a conversation is skipped;
+measured on 36 conversations: 1.5 skipped 39% of minutes and none of his conversations, 2.5
+skipped 48% but two faint ones of his. `OMIBRIDGE_MAI_AUDIO=all` sends kept conversations whole.
+
+Naming floor (`OMIBRIDGE_IDENTIFY_RAW_FLOOR`, default 0.4, 0 = off): a speaker gets a person's name
+only if the voiceprint also resembles that person's samples in plain cosine (mean of the three
+closest), besides clearing the normalised score. The normalised score is inflated for a gallery
+entry learned from quiet, distant speech, because such a sample is unlike every voice in the
+comparison cohort; without the floor one such entry was named on 104 speakers in 36 different
+voices across 318 conversations, with it on 53 in 11. `OMIBRIDGE_IDENTIFY_RAW_FLOOR_WEARER`
+(default 0.3) is the floor for the wearer's own entry. The presence filter does not use the floor.
+
+Who spoke when (`OMIBRIDGE_DIARIZER`, default `mai`): MAI Transcribe 2 returns a speaker label per
+word (`diarize=true`, no extra cost). Labels hold only within one upload, and recordings with more
+than 10 minutes of speech go up in pieces, so each piece-local speaker gets a voiceprint from its
+clearest speech (turns of 1.5 s or more, 0.2 s trimmed off each edge, up to 30 s) and the pieces
+are linked by clustering those voiceprints, never joining two speakers of one piece. The same
+voiceprints are matched against the gallery; a speaker with less than `OMIBRIDGE_MIN_NAME_SECONDS`
+(3 s) of clear speech stays unnamed. If MAI fails or returns no labels, that conversation is
+diarized locally (below) and the log says so (rate limits and provider errors are retried
+with backoff first); `meta.json` records which path ran (`diarizer`),
+and `/health` shows the mode. On 3 AMI meetings (2026-11-12) this credited 0.4-4% of words to the
+wrong person (also when uploaded in 3 pieces), against 18-22% for the local diarizer; about 1 s per
+minute of speech for MAI plus 1 s for voiceprints. Live: 10-20 s wall time per minute of speech,
+plus ~8 s per conversation for upload and summary. Putting known people's clips at the start
+of the upload so MAI labels them itself: one person's 5-10 s clip got their label right 6/6 times,
+four clips 2-4/4, and the prefix made the rest of the diarization worse in 9 of 12 runs, so it is
+not used. Speakers can be named from the app (see app-fork/MAINTAINING.md) or the review page.
+
+`OMIBRIDGE_DIARIZER=local`, or the fallback: optional GPU speaker segmentation (Apple Silicon): `OMIBRIDGE_DIARIZER_DEVICE=mps` runs
+DiariZen's original PyTorch model (pinned in `omibridge/gpu_segmentation.py`) on the GPU instead
+of the ONNX file on the CPU. Install `requirements-gpu.txt` first (it moves PyTorch to the version
+DiariZen's pyannote needs). Measured on an M1 Mac mini: segmentation windows about 2x faster, the
+whole speaker step about 1.5x, identical speakers (one turn boundary moved by 0.02 s in 29). GPU
+memory: about 1.2 GB with `OMIBRIDGE_DIARIZER_BATCH=1` (0.55 s per 16 s window), 3.3 GB with 4
+(0.44 s), 6.7 GB peak with 8 (no faster). If anything about the GPU path fails, the bridge logs it
+and uses the CPU. `/health` shows which one is in use (`local_diarizer`).
 
 Data stays in `data/bridge/`: `conversations/<id>/` holds `audio.flac`,
 `conversation.json` (speakers and transcript lines) and the voiceprints needed

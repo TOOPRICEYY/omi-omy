@@ -8,7 +8,9 @@ requests>=2.31
 # bridge service
 fastapi>=0.110
 uvicorn>=0.29
+websockets>=12      # uvicorn needs it to serve the app's live audio socket
 python-multipart>=0.0.9
+av>=12             # Opus from the forked app (live socket and offline sync)
 # simulation and tests only
 httpx>=0.27
 pyroomacoustics>=0.7

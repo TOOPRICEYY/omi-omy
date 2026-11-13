@@ -11,3 +11,8 @@ data/librispeech/
 results/real/
 launchd/
 logs/
+
+# machine-specific and secret
+WEBHOOK_URL.txt
+cloudflared.yml
+*.credentials.json

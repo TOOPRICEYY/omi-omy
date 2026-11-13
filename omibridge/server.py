@@ -17,8 +17,9 @@ import threading
 import time
 from pathlib import Path
 
+import numpy as np
 import soundfile as sf
-from fastapi import Body, FastAPI, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
@@ -26,6 +27,7 @@ from attrib.audio import SR
 
 from .config import Config
 from .engine import Engine
+from .importer import parse_when, queue_recording
 from .sessions import SessionManager
 
 log = logging.getLogger("omibridge")
@@ -37,7 +39,7 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
     cfg = cfg or Config()
     cfg.ensure_dirs()
     if engine is None:
-        transcriber = None
+        transcriber = summarizer = None
         if cfg.transcribe:
             import os
 
@@ -45,20 +47,54 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
                 from attrib.transcribe import OpenRouterTranscriber
 
                 transcriber = OpenRouterTranscriber()
+                if cfg.summarize:
+                    from .summarize import Summarizer
+
+                    summarizer = Summarizer()
             else:
                 log.warning("OPENROUTER_API_KEY is not set: conversations will have speakers but no text")
-        engine = Engine(cfg, transcriber)
+        engine = Engine(cfg, transcriber, summarizer)
     sessions = SessionManager(cfg, engine.speech_seconds, clock)
     jobs: queue.Queue[str] = queue.Queue()
     status = {"processing": None, "last_error": None, "processed": 0}
     app = FastAPI(title="omi-omy bridge")
     app.state.cfg, app.state.engine, app.state.sessions, app.state.jobs = cfg, engine, sessions, jobs
+    # Objects with optional queued(cid) / processed(cid, doc) methods (the app API uses this
+    # to tell a connected phone when its conversation is ready).
+    listeners: list = []
+    app.state.listeners = listeners
+
+    def notify(event: str, *args) -> None:
+        for lst in list(listeners):
+            fn = getattr(lst, event, None)
+            if fn is None:
+                continue
+            try:
+                fn(*args)
+            except Exception:
+                log.exception("listener %s failed", event)
+
+    def enqueue(cid: str) -> None:
+        jobs.put(cid)
+        notify("queued", cid)
+
+    app.state.enqueue = enqueue
+
+    def summarize(cid: str) -> dict | None:
+        """Never raises: a conversation without a summary is still a conversation."""
+        try:
+            return engine.summarize(cid)
+        except Exception as e:
+            status["last_error"] = f"{cid}: summary failed: {e}"
+            log.exception("summary failed for %s", cid)
+            return None
 
     def process_one(cid: str) -> None:
         pcm, meta_p = cfg.queue_dir / f"{cid}.pcm", cfg.queue_dir / f"{cid}.json"
         status["processing"] = cid
         try:
             doc = engine.process(pcm, json.loads(meta_p.read_text()))
+            doc = summarize(cid) or doc
             if cfg.omi_writeback and cfg.omi_api_key and any(s["text"] for s in doc["segments"]):
                 from . import omi_api
 
@@ -71,6 +107,7 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
             pcm.unlink(missing_ok=True)
             meta_p.unlink(missing_ok=True)
             status["processed"] += 1
+            notify("processed", cid, doc)
         except Exception as e:
             status["last_error"] = f"{cid}: {e}"
             log.exception("processing %s failed", cid)
@@ -86,7 +123,7 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
         while True:
             time.sleep(5)
             for cid in sessions.sweep():
-                jobs.put(cid)
+                enqueue(cid)
 
     app.state.process_one = process_one
     if start_workers:
@@ -95,6 +132,8 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
             jobs.put(p.stem)
         threading.Thread(target=worker, daemon=True).start()
         threading.Thread(target=sweeper, daemon=True).start()
+        # Stored pages follow the gallery and the current page format (cheap: no model calls).
+        threading.Thread(target=engine.rerender_all, daemon=True).start()
 
     def conv_path(cid: str) -> Path:
         p = (cfg.conv_dir / cid).resolve()
@@ -119,7 +158,7 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
             log.exception("ingest failed")
             return {"state": "error"}
         if res.get("id"):
-            jobs.put(res["id"])
+            enqueue(res["id"])
         return res
 
     # Only the webhook goes on the port that the tunnel exposes.
@@ -132,7 +171,7 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
     def health():
         return {"ok": True, "recording": [s.uid for s in sessions.sessions.values()],
                 "queued": jobs.qsize(), **status, "people": len(engine.gallery.people),
-                "transcription": engine.transcriber is not None, "omi_writeback": bool(cfg.omi_writeback and cfg.omi_api_key)}
+                "transcription": engine.transcriber is not None, "diarizer": cfg.diarizer if engine.transcriber is not None else "local", "local_diarizer": getattr(getattr(getattr(engine, "diarizer", None), "seg", None), "device_name", "cpu"), "summaries": engine.summarizer is not None, "presence": cfg.presence, "presence_threshold": cfg.presence_threshold, "omi_writeback": bool(cfg.omi_writeback and cfg.omi_api_key)}
 
     @app.get("/", response_class=HTMLResponse)
     def index():
@@ -143,9 +182,30 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
         out = []
         for p in sorted(cfg.conv_dir.glob("*/conversation.json"), reverse=True)[:200]:
             d = json.loads(p.read_text())
+            summary = d.get("summary") or {}
             out.append({k: d[k] for k in ("id", "started_at", "duration", "speech_seconds", "speakers", "error")}
-                       | {"preview": " ".join(s["text"] for s in d["segments"][:3])[:160]})
+                       | {"title": summary.get("title"), "emoji": summary.get("emoji"),
+                          "preview": (summary.get("overview") or " ".join(s["text"] for s in d["segments"][:3]))[:160]})
         return out
+
+    @app.post("/api/import")
+    async def import_recording(file: UploadFile, started_at: str | None = Form(None)):
+        """A recording the webhook never saw (for example exported from the Omi app)."""
+        data = await file.read()
+
+        def work() -> list[str]:
+            x, sr = sf.read(io.BytesIO(data), dtype="float32")
+            return queue_recording(cfg, x, sr, parse_when(started_at), file.filename or "")
+
+        try:
+            ids = await run_in_threadpool(work)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except Exception:
+            raise HTTPException(400, "could not read that file as audio (WAV, FLAC, MP3 and OGG work)")
+        for cid in ids:
+            enqueue(cid)
+        return {"queued": ids}
 
     @app.get("/api/conversations/{cid}")
     def conversation(cid: str):
@@ -165,12 +225,49 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
         return Response(buf.getvalue(), media_type="audio/wav")
 
     @app.post("/api/conversations/{cid}/label")
-    def label(cid: str, speaker: str = Body(...), person: str = Body(...), learn: bool = Body(True)):
+    def label(cid: str, speaker: str = Body(...), person: str = Body(...), learn: bool = Body(True),
+              clusters: list[str] | None = Body(None)):
         conv_path(cid)
         try:
-            return engine.label(cid, speaker, person, learn)
+            doc = engine.label(cid, speaker, person, learn, clusters=clusters)
         except (KeyError, ValueError) as e:
             raise HTTPException(400, str(e))
+        if doc.get("summary"):
+            # The summary may mention the speaker by the old name; redo it in the background.
+            threading.Thread(target=summarize, args=(cid,), daemon=True).start()
+        if learn:
+            # Other conversations may now recognise this voice; refresh their pages.
+            threading.Thread(target=engine.rerender_all, kwargs={"skip": cid}, daemon=True).start()
+        return doc
+
+    @app.post("/api/conversations/{cid}/transcribe")
+    def transcribe_anyway(cid: str):
+        """Queue a stored conversation for transcription regardless of the presence filter
+        (for one the filter left untranscribed). Uses the stored audio; nothing is deleted."""
+        p = conv_path(cid)
+        if (cfg.queue_dir / f"{cid}.json").exists():
+            return {"queued": True}
+        meta = json.loads((p / "meta.json").read_text())
+        x, sr = sf.read(p / "audio.flac", dtype="float32")
+        if x.ndim > 1:
+            x = x.mean(axis=1)
+        keep = ("id", "uid", "started_at", "closed_at", "source", "samples")
+        q = {k: v for k, v in meta.items() if k in keep} | {"id": cid, "sample_rate": sr, "transcribe_anyway": True}
+        cfg.queue_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.queue_dir / f"{cid}.pcm").write_bytes((np.clip(x, -1, 1) * 32767).astype("<i2").tobytes())
+        (cfg.queue_dir / f"{cid}.json").write_text(json.dumps(q))
+        enqueue(cid)
+        return {"queued": True}
+
+    @app.post("/api/conversations/{cid}/summarize")
+    def resummarize(cid: str):
+        conv_path(cid)
+        if engine.summarizer is None:
+            raise HTTPException(400, "summaries are off (no OPENROUTER_API_KEY, or OMIBRIDGE_SUMMARIZE=0)")
+        doc = summarize(cid)
+        if doc is None:
+            raise HTTPException(502, status["last_error"] or "summary failed")
+        return doc
 
     @app.post("/api/conversations/{cid}/rerun")
     def rerun(cid: str):

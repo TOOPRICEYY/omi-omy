@@ -1,0 +1,42 @@
+diff --git a/app/lib/pages/onboarding/wrapper.dart b/app/lib/pages/onboarding/wrapper.dart
+index d5b27eac3..e62b7b27c 100644
+--- a/app/lib/pages/onboarding/wrapper.dart
++++ b/app/lib/pages/onboarding/wrapper.dart
+@@ -1,4 +1,5 @@
+ import 'package:omi/providers/auth_provider.dart';
++import 'package:omi/omiomy.dart';
+ import 'package:omi/backend/http/api/account_deletion.dart';
+ import 'package:omi/backend/http/api_result.dart';
+ import 'dart:async';
+@@ -236,6 +237,20 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
+     _onboardingAttempt = null;
+   }
+ 
++  /// omi-omy: no onboarding screens (language, name, pairing, speech profile ...). The bridge
++  /// already reports onboarding as completed; pairing stays on Home (Connect), and iOS asks for
++  /// Bluetooth and the microphone when they are first used. The save is sent in the background
++  /// and never holds the reader on this page.
++  Future<void> _omiomySkipOnboarding() async {
++    unawaited(OnboardingSyncRuntime.enqueue(completed: true).catchError((_) => false));
++    SharedPreferencesUtil().onboardingCompleted = true;
++    SharedPreferencesUtil().permissionsCompleted = true;
++    SharedPreferencesUtil().remove(_resumeKey);
++    _stepTelemetry.exit();
++    _completeOnboardingTelemetry();
++    if (mounted) routeToPage(context, const HomePageWrapper(), replace: true);
++  }
++
+   Future<void> _routeWithPermissionsCheck(BuildContext context) async {
+     _stepTelemetry.exit();
+     if (!SharedPreferencesUtil().permissionsCompleted) {
+@@ -318,6 +333,10 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
+   /// web page, Yinka's flow, or the native step the reader left off at. A web page that falls back
+   /// lands on that same native step.
+   Future<void> _enterSteps() async {
++    if (omiomyBuild) {
++      await _omiomySkipOnboarding();
++      return;
++    }
+     await _maybeShowSignupPaywall();
+     if (!mounted) return;
+     final arm = OnboardingVariantGate.arm;
