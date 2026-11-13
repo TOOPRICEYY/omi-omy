@@ -360,3 +360,38 @@ def test_transcribe_later_route(tmp_path):
     doc = json.loads((tmp_path / "conversations/c1/conversation.json").read_text())
     assert calls == [1] and not doc["skipped"] and doc["segments"]
     assert not (tmp_path / "queue/c1.json").exists()
+
+
+def test_skipped_page_survives_rerender_and_shows_in_app(tmp_path):
+    from omibridge.appapi import to_omi
+    e, x, calls = presence_engine(tmp_path, 0.4)
+    run(e, x, "c1")
+    e.wearer_presence = lambda y: 9.0
+    run(e, x, "c2")                                          # a normal conversation next to it
+    assert e.rerender_all() == 2
+    page = json.loads((tmp_path / "conversations/c1/conversation.json").read_text())
+    assert page["skipped"] and page["speakers"] == [] and page["segments"] == []
+    o = to_omi(page, "Me")
+    assert o["transcript_segments"] == [] and o["structured"]["title"].startswith("Not transcribed")
+    normal = json.loads((tmp_path / "conversations/c2/conversation.json").read_text())
+    assert not normal["skipped"] and all("cluster" in s for s in normal["segments"])
+    # learning a voice elsewhere (which re-renders every page) leaves the skipped one intact
+    cl = next(s for s in normal["speakers"] if s["clusters"])
+    e.label("c2", cl["name"], "Alice", clusters=cl["clusters"])
+    e.rerender_all(skip="c2")
+    assert json.loads((tmp_path / "conversations/c1/conversation.json").read_text())["skipped"]
+
+
+def test_transcribe_later_then_label_by_cluster(tmp_path):
+    from fastapi.testclient import TestClient
+    from omibridge.server import create_app
+    e, x, calls = presence_engine(tmp_path, 0.4)
+    run(e, x)
+    app = create_app(e.cfg, engine=e, start_workers=False)
+    c = TestClient(app)
+    assert c.post("/api/conversations/c1/transcribe").status_code == 200
+    app.state.process_one("c1")
+    page = json.loads((tmp_path / "conversations/c1/conversation.json").read_text())
+    sp = page["speakers"][0]
+    r = c.post("/api/conversations/c1/label", json={"speaker": sp["name"], "person": "Alice", "clusters": sp["clusters"]})
+    assert r.status_code == 200 and "Alice" in {s["name"] for s in r.json()["speakers"]}
