@@ -131,6 +131,8 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
             jobs.put(p.stem)
         threading.Thread(target=worker, daemon=True).start()
         threading.Thread(target=sweeper, daemon=True).start()
+        # Stored pages follow the gallery and the current page format (cheap: no model calls).
+        threading.Thread(target=engine.rerender_all, daemon=True).start()
 
     def conv_path(cid: str) -> Path:
         p = (cfg.conv_dir / cid).resolve()
@@ -222,10 +224,11 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
         return Response(buf.getvalue(), media_type="audio/wav")
 
     @app.post("/api/conversations/{cid}/label")
-    def label(cid: str, speaker: str = Body(...), person: str = Body(...), learn: bool = Body(True)):
+    def label(cid: str, speaker: str = Body(...), person: str = Body(...), learn: bool = Body(True),
+              clusters: list[str] | None = Body(None)):
         conv_path(cid)
         try:
-            doc = engine.label(cid, speaker, person, learn)
+            doc = engine.label(cid, speaker, person, learn, clusters=clusters)
         except (KeyError, ValueError) as e:
             raise HTTPException(400, str(e))
         if doc.get("summary"):

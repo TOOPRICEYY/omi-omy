@@ -478,6 +478,41 @@ def test_app_names_a_voice_and_bridge_learns_it(tmp_path):
     assert json.loads((e.cfg.app_dir / "wearer.json").read_text())["name"] == "Gabriel"
 
 
+def test_app_naming_from_a_stale_view_names_the_voice_the_app_showed(tmp_path):
+    """The app holds an older copy of a conversation. Meanwhile the gallery learned a voice and
+    every stored page was refreshed, so names changed there. The speaker numbers and line ids
+    the app holds must still point at the voices it showed."""
+    from tests.test_maidiar import run
+    e, api, client, h, x = naming_env(tmp_path, wearer="Gabriel")
+    cid, other = "20261112-100000-conv", "20261112-110000-conv"
+    run(e, x, other)
+    view = client.get(f"{P}/v1/conversations/{cid}", headers=h).json()["transcript_segments"]    # stale from here on
+    a_line = next(l for l in view if l["start"] < 8)
+    b_line = next(l for l in view if 8 <= l["start"] < 15)
+    # The gallery learns A from the other conversation. This page is not refreshed yet: it still
+    # shows A as "unknown1", a name that now belongs to B.
+    o = json.loads((e.cfg.conv_dir / other / "conversation.json").read_text())
+    e.label(other, None, "Gabriel", clusters=next(s["clusters"] for s in o["speakers"] if "S0" in s["clusters"]))
+    r = client.patch(f"{P}/v1/conversations/{cid}/segments/assign-bulk", headers=h,
+                     json={"segment_ids": [a_line["id"]], "assign_type": "is_user", "value": "true"})
+    assert r.status_code == 200, r.text
+    lines = r.json()["transcript_segments"]
+    assert all(l["is_user"] == (l["start"] < 8 or 15 <= l["start"] < 23) for l in lines)        # A, not B
+    # After the refresh the app's line ids and speaker numbers are still the same lines and voices.
+    e.rerender_all()
+    fresh = client.get(f"{P}/v1/conversations/{cid}", headers=h).json()["transcript_segments"]
+    assert [(l["id"], l["start"], l["speaker_id"]) for l in fresh] == [(l["id"], l["start"], l["speaker_id"]) for l in view]
+    # From the stale view, B is named by speaker number and by line id: B's voice gets the name, not A's.
+    pid = client.post(f"{P}/v1/users/people", headers=h, json={"name": "Bob"}).json()["id"]
+    r = client.patch(f"{P}/v1/conversations/{cid}/assign-speaker/{b_line['speaker_id']}",
+                     params={"assign_type": "person_id", "value": pid}, headers=h, json={"segment_ids": [b_line["id"]]})
+    assert r.status_code == 200, r.text
+    lines = r.json()["transcript_segments"]
+    assert all(l["person_id"] == pid for l in lines if 8 <= l["start"] < 15 or 23 <= l["start"] < 30)
+    assert all(l["is_user"] for l in lines if l["start"] < 8 or 15 <= l["start"] < 23)
+    assert set(e.gallery.people) == {"Gabriel", "Bob"}
+
+
 def test_app_naming_rejects_bad_input(tmp_path):
     e, api, client, h, _ = naming_env(tmp_path, wearer="Gabriel")
     cid = "20261112-100000-conv"

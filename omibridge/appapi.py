@@ -78,18 +78,42 @@ def is_unknown(name: str) -> bool:
 
 
 # -- conversation.json -> the app's conversation shape ----------------------------
+def all_clusters(doc: dict) -> list[str]:
+    """Every voice cluster of a conversation, in an order that never changes for it."""
+    return sorted({l for s in doc.get("speakers", []) for l in s.get("clusters", [])})
+
+
+def speaker_ids(doc: dict) -> dict[str, int]:
+    """Speaker name -> the number the app knows that speaker by. It is the position of the
+    speaker's first cluster among all clusters, so a number the app got earlier still points at
+    the same voice after the gallery learned and names changed."""
+    order = all_clusters(doc)
+    return {s["name"]: order.index(min(s["clusters"])) if s.get("clusters") else len(order) + i
+            for i, s in enumerate(doc.get("speakers", []))}
+
+
+def voice_of(doc: dict, cluster: str | None) -> tuple[str, list[str]] | None:
+    """The speaker (name, clusters) a cluster belongs to on the stored page. For an unnamed
+    speaker that is the whole group the bridge merged; for a named one only the cluster itself,
+    so that correcting one voice never renames another that shares the name."""
+    for s in doc.get("speakers", []):
+        if cluster in s.get("clusters", []):
+            return s["name"], (list(s["clusters"]) if is_unknown(s["name"]) else [cluster])
+    return None
+
+
 def to_omi(doc: dict, wearer: str | None) -> dict:
     """Map the bridge's conversation.json to the shape the Omi app parses
     (app/lib/backend/schema/gen/conversation_wire.g.dart)."""
     started = doc.get("started_at")
     duration = doc.get("duration") or 0
-    order = [s["name"] for s in doc.get("speakers", [])]
+    ids = speaker_ids(doc)
     segs = []
     for i, s in enumerate(doc.get("segments", [])):
         name = s.get("speaker") or "unknown"
         known = not is_unknown(name)
         is_user = bool(wearer) and name == wearer
-        sid = order.index(name) if name in order else len(order)
+        sid = ids.get(name, len(all_clusters(doc)) + len(ids))
         segs.append({"id": f"{doc['id']}-{i}", "text": s.get("text", ""), "start": float(s["start"]),
                      "end": float(s["end"]), "is_user": is_user, "speaker": f"SPEAKER_{sid:02d}",
                      "speaker_id": sid, "person_id": person_id(name) if known and not is_user else None,
@@ -291,25 +315,40 @@ class AppAPI:
             raise HTTPException(404, "no such conversation")
         value = None if value in (None, "null", "") else value
         doc = json.loads((p / "conversation.json").read_text())
-        order = [s["name"] for s in doc.get("speakers", [])]
+        order = all_clusters(doc)
         segs = doc.get("segments", [])
-        voices: list[str] = []
+
+        def line_cluster(seg: dict) -> str | None:
+            if "cluster" in seg:
+                return seg["cluster"]
+            # A page stored before lines carried their cluster: go by the name it shows.
+            return next((min(s["clusters"]) for s in doc.get("speakers", [])
+                         if s["name"] == seg.get("speaker") and s.get("clusters")), None)
+
+        picked: list[str | None] = []
         if speaker_id is not None:
             if not 0 <= speaker_id < len(order):
                 raise HTTPException(409, "stale speaker")
-            voices.append(order[speaker_id])
+            picked.append(order[speaker_id])
         if segment_index is not None:
             if not 0 <= segment_index < len(segs):
                 raise HTTPException(404, "no such segment")
-            voices.append(segs[segment_index].get("speaker") or "unknown")
+            picked.append(line_cluster(segs[segment_index]))
         for sid in segment_ids or []:
             pre, _, idx = sid.rpartition("-")
             if pre != cid or not idx.isdigit() or int(idx) >= len(segs):
                 raise HTTPException(404, f"no such segment {sid!r}")
-            voices.append(segs[int(idx)].get("speaker") or "unknown")
-        voices = list(dict.fromkeys(voices))
-        if not voices:
+            picked.append(line_cluster(segs[int(idx)]))
+        if not picked:
             raise HTTPException(400, "nothing selected")
+        # name shown -> clusters to name, each voice once
+        voices: dict[str, list[str]] = {}
+        for c in dict.fromkeys(picked):
+            v = voice_of(doc, c)
+            if v is None:
+                raise HTTPException(409, "stale speaker")
+            voices.setdefault(v[0], [])
+            voices[v[0]] += [l for l in v[1] if l not in voices[v[0]]]
         person = None
         if assign_type == "is_user" and str(value).lower() in ("true", "1"):
             person = self.wearer_name()
@@ -319,10 +358,10 @@ class AppAPI:
                 raise HTTPException(404, "no such person")
         if person is not None:
             with self.label_lock:
-                for v in voices:
-                    if v != person:
+                for shown, clusters in voices.items():
+                    if shown != person:
                         try:
-                            self.engine.label(cid, v, person)
+                            self.engine.label(cid, shown, person, clusters=clusters)
                         except KeyError:
                             raise HTTPException(409, "stale speaker")
             log.info("app named a voice in %s", cid)

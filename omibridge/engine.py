@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import pickle
 import threading
 import time
@@ -140,7 +141,12 @@ class Engine:
         meta = json.loads((out / "meta.json").read_text())
         names, conf = self.name_clusters(st["clusters"], st["pinned"])
         turns = [Turn(t.start, t.end, names[t.speaker], conf[t.speaker], t.speaker) for t in st["turns"]]
-        words = assign_words(st["words"], turns)
+        # Lines are cut by voice cluster, not by name: they stay the same lines (same order, same
+        # ids in the app) whatever the gallery learns later. Each line carries its cluster.
+        lines = segments(assign_words(st["words"], st["turns"]), st["turns"])
+        for line in lines:
+            cluster = line["speaker"] if line["speaker"] in names else None
+            line["cluster"], line["speaker"] = cluster, names.get(cluster, "unknown")
         by_label = {c.label: c for c in st["clusters"]}
         speakers: dict[str, dict] = {}
         for label, name in names.items():
@@ -158,10 +164,13 @@ class Engine:
         doc = {"id": cid, "started_at": meta.get("started_at"), "duration": round(meta.get("duration", 0), 1),
                "speech_seconds": round(meta.get("speech_seconds", 0), 1), "error": meta.get("error"),
                "speakers": sorted(speakers.values(), key=lambda s: -s["speech_seconds"]),
-               "summary": None, "segments": segments(words, turns)}
+               "summary": None, "segments": lines}
         if (out / "summary.json").exists():
             doc["summary"] = json.loads((out / "summary.json").read_text())
-        (out / "conversation.json").write_text(json.dumps(doc, indent=1))
+        # Atomic: readers (the page, the app, a re-render in another thread) never see half a file.
+        tmp = out / f"conversation.json.{threading.get_ident()}.tmp"
+        tmp.write_text(json.dumps(doc, indent=1))
+        os.replace(tmp, out / "conversation.json")
         return doc
 
     def summarize(self, cid: str) -> dict:
@@ -178,28 +187,34 @@ class Engine:
         (self.cfg.conv_dir / cid / "summary.json").write_text(json.dumps(summary, ensure_ascii=False))
         return self.render(cid)
 
-    def label(self, cid: str, speaker: str, person: str, learn: bool = True) -> dict:
-        """The user says `speaker` (a current name in this conversation, usually
-        unknownN) is `person`. Pins it here and, if `learn`, adds that voice to
-        the gallery so later conversations recognize it."""
+    def label(self, cid: str, speaker: str | None, person: str, learn: bool = True,
+              clusters: list[str] | None = None) -> dict:
+        """The user says a voice in this conversation is `person`. Pins it here and, if `learn`,
+        adds that voice to the gallery so later conversations recognize it.
+
+        The voice is given by `clusters` (the cluster labels of the speaker the user saw, from
+        conversation.json), which stay the same whatever the gallery has learned since. Without
+        them, `speaker` is a name: the one on the stored page if it is there (that is what the
+        user saw; "unknown1" can mean another voice once the gallery has learned), otherwise a
+        current name."""
         person = person.strip()
         if not person:
             raise ValueError("empty name")
         out = self.cfg.conv_dir / cid
         with open(out / "state.pkl", "rb") as f:
             st = pickle.load(f)
-        names, _ = self.name_clusters(st["clusters"], st["pinned"])
-        labels = [l for l, n in names.items() if n == speaker]
-        if not labels:
-            # The page (or the app) shows the names from the last render; the gallery may have
-            # learned voices since, so the same voice can have a new name now. Use the clusters
-            # behind the name that was shown.
+        have = {c.label for c in st["clusters"]}
+        if clusters is not None:
+            labels = [l for l in clusters if l in have]
+        else:
             try:
                 shown = json.loads((out / "conversation.json").read_text())["speakers"]
-                labels = [l for sp in shown if sp["name"] == speaker for l in sp.get("clusters", [])
-                          if any(c.label == l for c in st["clusters"])]
+                labels = [l for sp in shown if sp["name"] == speaker for l in sp.get("clusters", []) if l in have]
             except (OSError, ValueError, KeyError):
                 labels = []
+            if not labels:
+                names, _ = self.name_clusters(st["clusters"], st["pinned"])
+                labels = [l for l, n in names.items() if n == speaker]
         if not labels:
             raise KeyError(f"no speaker {speaker!r} in {cid}")
         for c in st["clusters"]:

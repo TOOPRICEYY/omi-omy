@@ -87,8 +87,9 @@ async function refresh() {
       <button class="g" data-forget="${esc(p.name)}">Forget</button></div>`).join("") || `<div class="mut">Nobody enrolled yet.</div>`;
   $("#names").innerHTML = people.map((p) => `<option value="${esc(p.name)}">`).join("");
 }
+let shown = null;
 function show(d) {
-  current = d.id;
+  current = d.id; shown = d;
   const sm = d.summary;
   $("#detail").innerHTML = `<h1>${esc(sm ? (sm.emoji ? sm.emoji + " " : "") + sm.title : when(d.started_at))}</h1>
     <div class="status">${sm ? esc(when(d.started_at)) + " · " : ""}${fmt(d.duration)} long, ${fmt(d.speech_seconds)} of speech${d.error ? ` · <span class="err">${esc(d.error)}</span>` : ""}</div>
@@ -114,7 +115,7 @@ document.addEventListener("click", async (e) => {
       const person = document.querySelector(`[data-in="${t.dataset.i}"]`).value.trim();
       if (!person) return;
       show(await api(`/api/conversations/${current}/label`, { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ speaker: t.dataset.label, person, learn: true }) }));
+        body: JSON.stringify({ speaker: t.dataset.label, person, learn: true, clusters: shown.speakers[+t.dataset.i].clusters }) }));
       refresh();
     } else if (t.dataset.forget) {
       if (confirm(`Forget ${t.dataset.forget}'s voice?`)) { await api(`/api/people/${encodeURIComponent(t.dataset.forget)}`, { method: "DELETE" }); refresh(); }

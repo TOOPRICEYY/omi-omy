@@ -4,6 +4,7 @@ import json
 import threading
 
 import numpy as np
+import pytest
 
 from attrib.audio import SR
 from attrib.maidiar import clear_spans, mai_clusters, turns_from_words
@@ -198,24 +199,45 @@ def test_transcriber_retries_rate_limits(monkeypatch):
     assert [(w.text, w.speaker) for w in words] == [("hi", "p0:1")] and waits == [5.0, 15.0]
 
 
-def test_label_uses_the_name_the_page_showed_after_the_gallery_learned(tmp_path):
+def test_naming_from_a_stale_page_names_the_voice_that_was_shown(tmp_path):
     x, truth = audio([("A", 8), ("B", 7), ("A", 8), ("B", 7)])
     e = engine(tmp_path, FakeTranscriber(words_for(truth, lambda who, p: {"A": 0, "B": 1}[who])))
-    doc = run(e, x, "c1")
-    shown = {s["name"] for s in doc["speakers"]}
-    assert shown == {"unknown1", "unknown2"}
-    run(e, x, "c2")
-    # Naming A in another conversation teaches the gallery A's voice ...
-    a_name = next(s["name"] for s in e.render("c2")["speakers"] if "S0" in s["clusters"])
-    e.label("c2", a_name, "Alice")
-    assert "Alice" in {s["name"] for s in e.render("c1")["speakers"]}      # c1 would now say Alice
-    # ... but c1's stored page still shows the old names until it is re-rendered; naming from it works.
-    old = json.loads((tmp_path / "conversations/c1/conversation.json").read_text())
-    stale_b = next(s["name"] for s in old["speakers"] if "S1" in s["clusters"])
-    stale_a = next(s["name"] for s in old["speakers"] if "S0" in s["clusters"])
-    e.label("c1", stale_a, "Alice")
-    doc = e.label("c1", stale_b, "Bob")
-    assert {s["name"] for s in doc["speakers"]} == {"Alice", "Bob"}
+    page = lambda cid: json.loads((tmp_path / "conversations" / cid / "conversation.json").read_text())
+    by_cluster = lambda doc: {l: s["name"] for s in doc["speakers"] for l in s["clusters"]}
+    run(e, x, "c1"); run(e, x, "c2"); run(e, x, "c3")
+    a, b = by_cluster(page("c1"))["S0"], by_cluster(page("c1"))["S1"]
+    assert {a, b} == {"unknown1", "unknown2"}
+    # Naming A in c2 teaches the gallery A's voice. c1 and c3 keep their stored pages (old names),
+    # but with the gallery as it is now B would be the first unknown voice there: "unknown1".
+    e.label("c2", by_cluster(page("c2"))["S0"], "Alice")
+    assert by_cluster(page("c1")) == {"S0": a, "S1": b}
+    # By name alone, the name means what the stored page shows: A, not the voice now called that.
+    doc = e.label("c1", a, "Alice")
+    assert by_cluster(doc) == {"S0": "Alice", "S1": "unknown1"} and len(e.gallery.people) == 1
+    # By clusters (what the page and the app send), whatever the names have become since.
+    stale = page("c3")
+    e.label("c3", "unknown1", "Bob", clusters=[l for s in stale["speakers"] if "S1" in s["clusters"] for l in s["clusters"]])
+    assert by_cluster(page("c3"))["S1"] == "Bob" and by_cluster(e.render("c3"))["S0"] == "Alice"
+    with pytest.raises(KeyError):
+        e.label("c3", "unknown1", "Carol", clusters=["nope"])
+
+
+def test_lines_do_not_depend_on_names(tmp_path):
+    # The same voice split into two clusters (two MAI speakers), talking back to back.
+    x, truth = audio([("A", 8), ("A", 8), ("B", 7)])
+    ws = sum((words_for(truth[i:i + 1], lambda who, p, n=n: n) for i, n in enumerate([0, 2, 1])), [])
+    e = engine(tmp_path, FakeTranscriber(ws))
+    before = run(e, x, "c1")
+    cut = [(s["start"], s["end"], s["cluster"]) for s in before["segments"]]
+    assert all(s["cluster"] for s in before["segments"])
+    one, two = before["segments"][:2]
+    assert one["speaker"] == two["speaker"] and one["cluster"] != two["cluster"]         # one name, two lines
+    first = before["segments"][0]
+    e.label("c1", None, "Alice", clusters=[l for s in before["speakers"] for l in s["clusters"]
+                                           if s["name"] == first["speaker"]])
+    after = e.render("c1")
+    assert [(s["start"], s["end"], s["cluster"]) for s in after["segments"]] == cut      # same lines, same order
+    assert not list((tmp_path / "conversations/c1").glob("*.tmp"))
 
 
 def test_rerender_all_refreshes_pages(tmp_path):
