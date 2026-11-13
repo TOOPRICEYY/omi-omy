@@ -89,6 +89,14 @@ bridge's own normalised score, best three) runs before MAI, about 0.5 s per audi
 measured on 36 conversations: 1.5 skipped 39% of minutes and none of his conversations, 2.5
 skipped 48% but two faint ones of his. `OMIBRIDGE_MAI_AUDIO=all` sends kept conversations whole.
 
+Naming floor (`OMIBRIDGE_IDENTIFY_RAW_FLOOR`, default 0.4, 0 = off): a speaker gets a person's name
+only if the voiceprint also resembles that person's samples in plain cosine (mean of the three
+closest), besides clearing the normalised score. The normalised score is inflated for a gallery
+entry learned from quiet, distant speech, because such a sample is unlike every voice in the
+comparison cohort; without the floor one such entry was named on 104 speakers in 36 different
+voices across 318 conversations, with it on 53 in 11. `OMIBRIDGE_IDENTIFY_RAW_FLOOR_WEARER`
+(default 0.3) is the floor for the wearer's own entry. The presence filter does not use the floor.
+
 Who spoke when (`OMIBRIDGE_DIARIZER`, default `mai`): MAI Transcribe 2 returns a speaker label per
 word (`diarize=true`, no extra cost). Labels hold only within one upload, and recordings with more
 than 10 minutes of speech go up in pieces, so each piece-local speaker gets a voiceprint from its

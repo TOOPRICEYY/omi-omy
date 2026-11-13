@@ -86,8 +86,11 @@ class Config:
     # learned from a quiet, distant speaker was named on 104 clusters in 36 voice groups without
     # the check and on 53 in 11 with 0.4, while the wearer kept 144 of 152.
     identify_raw_floor: float = field(default_factory=lambda: _f("OMIBRIDGE_IDENTIFY_RAW_FLOOR", 0.4))
-    # The same check for the wearer's own entry; negative means "the same as above".
-    identify_raw_floor_wearer: float = field(default_factory=lambda: _f("OMIBRIDGE_IDENTIFY_RAW_FLOOR_WEARER", -1))
+    # The same check for the wearer's own entry; negative means "the same as above". Measured on
+    # the same 318 with a wearer entry learned from one recording: at 0.4 thirteen of the wearer's
+    # own names went to unknown, at 0.3 ten of them stay and no confident one is lost, and the
+    # other entry stays at 53. Worth raising to 0.4 once the wearer has tens of seconds enrolled.
+    identify_raw_floor_wearer: float = field(default_factory=lambda: _f("OMIBRIDGE_IDENTIFY_RAW_FLOOR_WEARER", 0.3))
     transcribe: bool = field(default_factory=lambda: os.environ.get("OMIBRIDGE_TRANSCRIBE", "1") != "0")
     # Title, overview and action items for each conversation (same OpenRouter key).
     summarize: bool = field(default_factory=lambda: os.environ.get("OMIBRIDGE_SUMMARIZE", "1") != "0")
