@@ -17,6 +17,7 @@ import threading
 import time
 from pathlib import Path
 
+import numpy as np
 import soundfile as sf
 from fastapi import Body, FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -170,7 +171,7 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
     def health():
         return {"ok": True, "recording": [s.uid for s in sessions.sessions.values()],
                 "queued": jobs.qsize(), **status, "people": len(engine.gallery.people),
-                "transcription": engine.transcriber is not None, "diarizer": cfg.diarizer if engine.transcriber is not None else "local", "local_diarizer": getattr(getattr(getattr(engine, "diarizer", None), "seg", None), "device_name", "cpu"), "summaries": engine.summarizer is not None, "omi_writeback": bool(cfg.omi_writeback and cfg.omi_api_key)}
+                "transcription": engine.transcriber is not None, "diarizer": cfg.diarizer if engine.transcriber is not None else "local", "local_diarizer": getattr(getattr(getattr(engine, "diarizer", None), "seg", None), "device_name", "cpu"), "summaries": engine.summarizer is not None, "presence": cfg.presence, "presence_threshold": cfg.presence_threshold, "omi_writeback": bool(cfg.omi_writeback and cfg.omi_api_key)}
 
     @app.get("/", response_class=HTMLResponse)
     def index():
@@ -238,6 +239,25 @@ def create_app(cfg: Config | None = None, engine: Engine | None = None, start_wo
             # Other conversations may now recognise this voice; refresh their pages.
             threading.Thread(target=engine.rerender_all, kwargs={"skip": cid}, daemon=True).start()
         return doc
+
+    @app.post("/api/conversations/{cid}/transcribe")
+    def transcribe_anyway(cid: str):
+        """Queue a stored conversation for transcription regardless of the presence filter
+        (for one the filter left untranscribed). Uses the stored audio; nothing is deleted."""
+        p = conv_path(cid)
+        if (cfg.queue_dir / f"{cid}.json").exists():
+            return {"queued": True}
+        meta = json.loads((p / "meta.json").read_text())
+        x, sr = sf.read(p / "audio.flac", dtype="float32")
+        if x.ndim > 1:
+            x = x.mean(axis=1)
+        keep = ("id", "uid", "started_at", "closed_at", "source", "samples")
+        q = {k: v for k, v in meta.items() if k in keep} | {"id": cid, "sample_rate": sr, "transcribe_anyway": True}
+        cfg.queue_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.queue_dir / f"{cid}.pcm").write_bytes((np.clip(x, -1, 1) * 32767).astype("<i2").tobytes())
+        (cfg.queue_dir / f"{cid}.json").write_text(json.dumps(q))
+        enqueue(cid)
+        return {"queued": True}
 
     @app.post("/api/conversations/{cid}/summarize")
     def resummarize(cid: str):

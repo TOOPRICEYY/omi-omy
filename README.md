@@ -77,6 +77,17 @@ and use "Import a recording" on the review page (`POST /api/import` on the
 private port). Recordings longer than `OMIBRIDGE_MAX_MINUTES` are cut at quiet
 points into several conversations.
 
+Presence filter (`OMIBRIDGE_PRESENCE`, default `off`): with `skip`, a conversation in which the
+enrolled wearer's voice (gallery entries named like `OMIBRIDGE_WEARER`, any case) is not found is
+kept but not transcribed: no MAI cost, the audio stays, the review page and the app show "Not
+transcribed: your voice not found" with the match score, and "Transcribe it" on the review page
+(`POST /api/conversations/<id>/transcribe`) queues it normally. Never skips while no wearer is
+enrolled. The check (`omibridge/presence.py`: pyannote speech, TitaNet on 3 s pieces, the
+bridge's own normalised score, best three) runs before MAI, about 0.5 s per audio minute.
+`OMIBRIDGE_PRESENCE_THRESHOLD` (default 1.5) is the score under which a conversation is skipped;
+measured on 36 conversations: 1.5 skipped 39% of minutes and none of his conversations, 2.5
+skipped 48% but two faint ones of his. `OMIBRIDGE_MAI_AUDIO=all` sends kept conversations whole.
+
 Who spoke when (`OMIBRIDGE_DIARIZER`, default `mai`): MAI Transcribe 2 returns a speaker label per
 word (`diarize=true`, no extra cost). Labels hold only within one upload, and recordings with more
 than 10 minutes of speech go up in pieces, so each piece-local speaker gets a voiceprint from its

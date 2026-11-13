@@ -93,6 +93,8 @@ function show(d) {
   const sm = d.summary;
   $("#detail").innerHTML = `<h1>${esc(sm ? (sm.emoji ? sm.emoji + " " : "") + sm.title : when(d.started_at))}</h1>
     <div class="status">${sm ? esc(when(d.started_at)) + " · " : ""}${fmt(d.duration)} long, ${fmt(d.speech_seconds)} of speech${d.error ? ` · <span class="err">${esc(d.error)}</span>` : ""}</div>
+    ${d.skipped ? `<div class="card"><div>Not transcribed: ${esc(d.skipped)}${d.presence_score != null ? ` (voice match ${d.presence_score})` : ""}. The audio is kept.</div>
+      <button class="b" data-transcribe="1">Transcribe it</button></div>` : ""}
     ${sm ? `<div class="card"><div>${esc(sm.overview)}</div>${sm.action_items.length ? `<h2>Action items</h2><ul>${sm.action_items.map((a) => `<li>${esc(a)}</li>`).join("")}</ul>` : ""}</div>` : ""}
     <div class="card">${d.speakers.map((s, i) => `<div class="row">
         <span class="name ${s.known ? "" : "unk"}">${esc(s.name)}</span>
@@ -111,6 +113,9 @@ document.addEventListener("click", async (e) => {
     else if (t.dataset.play) {
       const [a, b] = t.dataset.play.split(",");
       player.src = `/api/conversations/${current}/audio?start=${a}&end=${b}`; player.play();
+    } else if (t.dataset.transcribe) {
+      t.disabled = true; t.textContent = "Queued";
+      await api(`/api/conversations/${current}/transcribe`, { method: "POST" });
     } else if (t.dataset.label) {
       const person = document.querySelector(`[data-in="${t.dataset.i}"]`).value.trim();
       if (!person) return;

@@ -119,6 +119,12 @@ def to_omi(doc: dict, wearer: str | None) -> dict:
                      "speaker_id": sid, "person_id": person_id(name) if known and not is_user else None,
                      "speech_profile_processed": True})
     summary = doc.get("summary") or {}
+    if doc.get("skipped") and not summary:
+        score = doc.get("presence_score")
+        summary = {"title": "Not transcribed: your voice not found", "emoji": "🔇", "category": "other",
+                   "overview": "This recording was kept but not transcribed because your voice was not found in it"
+                               + (f" (voice match {score})" if score is not None else "")
+                               + ". It can be transcribed from the review page."}
     first = " ".join(s["text"] for s in segs[:3] if s["text"]).strip()
     structured = {
         "title": summary.get("title") or ("Conversation" if not first else first[:48]),

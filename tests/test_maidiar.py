@@ -288,3 +288,75 @@ def test_hp_norm_removes_rumble_and_levels():
     after = 10 * np.log10(band(y, 1000) / band(y, 40))
     assert after - before > 30 and np.abs(y).max() <= 0.99
     assert abs(20 * np.log10(np.sqrt(np.mean(y ** 2))) - (-20)) < 2      # voice brought up to about -20 dBFS
+
+
+# -- presence filter -------------------------------------------------------------
+def presence_engine(tmp_path, score, mode="skip"):
+    x, truth = audio([("A", 8), ("B", 7)])
+    calls = []
+
+    class Counting(FakeTranscriber):
+        def __call__(self, wav, phrases=None, diarize=False):
+            calls.append(1)
+            return super().__call__(wav, phrases, diarize)
+
+    e = engine(tmp_path, Counting(words_for(truth, lambda who, p: {"A": 0, "B": 1}[who])))
+    e.cfg.presence = mode
+
+    def fake_presence(y):
+        if score == "boom":
+            raise AssertionError("presence must not run")
+        return score
+    e.wearer_presence = fake_presence
+    return e, x, calls
+
+
+def test_presence_skip_keeps_audio_and_costs_nothing(tmp_path):
+    e, x, calls = presence_engine(tmp_path, 0.4)
+    doc = run(e, x)
+    assert calls == [] and doc["skipped"] == "your voice not found" and doc["presence_score"] == 0.4
+    assert (tmp_path / "conversations/c1/audio.flac").exists() and doc["segments"] == []
+    from omibridge.appapi import to_omi
+    assert to_omi(doc, None)["structured"]["title"].startswith("Not transcribed")
+
+
+def test_presence_keeps_when_wearer_found(tmp_path):
+    e, x, calls = presence_engine(tmp_path, 4.2)
+    doc = run(e, x)
+    assert calls == [1] and not doc["skipped"] and doc["segments"]
+    assert json.loads((tmp_path / "conversations/c1/meta.json").read_text())["presence_score"] == 4.2
+
+
+def test_presence_never_skips_without_enrolled_wearer(tmp_path):
+    e, x, calls = presence_engine(tmp_path, None)          # wearer_presence returns None: no wearer
+    doc = run(e, x)
+    assert calls == [1] and not doc["skipped"]
+    from omibridge.presence import wearer_entries
+    from attrib.identify import Gallery
+    g = Gallery()
+    g.add("ME", fake_embed(x)); g.add("Me", fake_embed(x)); g.add("Bob", fake_embed(x))
+    assert sorted(wearer_entries(g, "me")) == ["ME", "Me"] and wearer_entries(g, None) == []
+
+
+def test_presence_off_by_default_changes_nothing(tmp_path):
+    assert Config(data_dir=tmp_path).presence == "off"
+    e, x, calls = presence_engine(tmp_path, "boom", mode="off")
+    doc = run(e, x)
+    assert calls == [1] and not doc["skipped"]
+
+
+def test_transcribe_later_route(tmp_path):
+    from fastapi.testclient import TestClient
+    from omibridge.server import create_app
+    e, x, calls = presence_engine(tmp_path, 0.4)
+    run(e, x)
+    app = create_app(e.cfg, engine=e, start_workers=False)
+    c = TestClient(app.state.private if hasattr(app.state, "private") else app)
+    r = c.post("/api/conversations/c1/transcribe")
+    assert r.status_code == 200, r.text
+    q = json.loads((tmp_path / "queue/c1.json").read_text())
+    assert q["transcribe_anyway"] is True
+    app.state.process_one("c1")
+    doc = json.loads((tmp_path / "conversations/c1/conversation.json").read_text())
+    assert calls == [1] and not doc["skipped"] and doc["segments"]
+    assert not (tmp_path / "queue/c1.json").exists()

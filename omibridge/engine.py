@@ -87,12 +87,37 @@ class Engine:
         return names, conf
 
     # -- a whole conversation --------------------------------------------------
+    def wearer_presence(self, x: np.ndarray) -> float | None:
+        """Presence score of the enrolled wearer's voice in `x`, or None when no wearer is enrolled."""
+        if getattr(self, "_presence", None) is None:
+            from .presence import Presence
+
+            self._presence = Presence(self.cfg.models_dir, self.embedder, self.cohort)
+        return self._presence.score(x, self.gallery, self.cfg.wearer)
+
     def process(self, pcm_path: Path, meta: dict) -> dict:
         x = np.frombuffer(pcm_path.read_bytes(), dtype="<i2").astype(np.float32) / 32768.0
         x = resample(x, int(meta.get("sample_rate", SR)))
         cid = meta["id"]
         out = self.cfg.conv_dir / cid
         out.mkdir(parents=True, exist_ok=True)
+        meta = {k: v for k, v in meta.items() if k not in ("skipped", "presence_score")}
+        if self.cfg.presence == "skip" and not meta.pop("transcribe_anyway", False) and len(x):
+            score = self.wearer_presence(x)
+            if score is not None and score < self.cfg.presence_threshold:
+                # Kept, not transcribed: no MAI cost; "Transcribe" on the review page redoes it.
+                sf.write(out / "audio.flac", x, SR, format="FLAC", subtype="PCM_16")
+                with open(out / "state.pkl", "wb") as f:
+                    pickle.dump({"turns": [], "words": [], "clusters": [], "pinned": {}}, f)
+                meta = dict(meta) | {"duration": len(x) / SR, "speech_seconds": 0.0, "error": None,
+                                     "diarizer": None, "skipped": "your voice not found",
+                                     "presence_score": round(score, 2) if np.isfinite(score) else None}
+                (out / "meta.json").write_text(json.dumps(meta))
+                log.info("%s: wearer not found (presence %.2f < %.2f); not transcribed", cid, score,
+                         self.cfg.presence_threshold)
+                return self.render(cid)
+            meta["presence_score"] = None if score is None or not np.isfinite(score) else round(score, 2)
+        meta.pop("transcribe_anyway", None)
         words: list[Word] = []
         error, mode = None, None
         with self.lock:
@@ -164,6 +189,7 @@ class Engine:
             best = max(mine, key=lambda t: t.duration)
             sp["sample"] = [round(best.start, 2), round(min(best.end, best.start + 12), 2)]
         doc = {"id": cid, "started_at": meta.get("started_at"), "duration": round(meta.get("duration", 0), 1),
+               "skipped": meta.get("skipped"), "presence_score": meta.get("presence_score"),
                "speech_seconds": round(meta.get("speech_seconds", 0), 1), "error": meta.get("error"),
                "speakers": sorted(speakers.values(), key=lambda s: -s["speech_seconds"]),
                "summary": None, "segments": lines}
@@ -179,7 +205,7 @@ class Engine:
         """Write (or rewrite, after speakers were named) the summary of a conversation.
         Leaves the old one in place when there is no summarizer or no text."""
         doc = self.render(cid)
-        if self.summarizer is None:
+        if self.summarizer is None or doc.get("skipped"):
             return doc
         when = doc.get("started_at")
         text = time.strftime("%A %d %B %Y, %H:%M", time.localtime(when)) if when else None

@@ -66,6 +66,11 @@ class Config:
     # What the conversation speech detector hears: "raw", or "hp150norm" (150 Hz high-pass plus
     # one gain per recording; recovers about a third of the lost words at 46% of audio sent).
     vad_front: str = field(default_factory=lambda: os.environ.get("OMIBRIDGE_VAD_FRONT", "raw").strip().lower())
+    # Presence filter (off by default): "skip" leaves a conversation untranscribed (audio kept,
+    # no MAI cost) when the wearer's enrolled voice is not found in it; it can be transcribed
+    # later from the review page. Never skips while no wearer is enrolled.
+    presence: str = field(default_factory=lambda: os.environ.get("OMIBRIDGE_PRESENCE", "off").strip().lower())
+    presence_threshold: float = field(default_factory=lambda: _f("OMIBRIDGE_PRESENCE_THRESHOLD", 1.5))
     segmentation: str = field(default_factory=lambda: os.environ.get("OMIBRIDGE_SEGMENTATION", "diarizen"))
     # "mps": DiariZen's PyTorch model on the Mac's GPU (needs requirements-gpu.txt; falls back
     # to the ONNX model on the CPU when unavailable). Only applies to the diarizen segmentation.
