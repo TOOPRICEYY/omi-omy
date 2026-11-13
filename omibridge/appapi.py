@@ -138,7 +138,7 @@ def to_omi(doc: dict, wearer: str | None) -> dict:
     return {"id": doc["id"], "created_at": iso(started) or iso(time.time()), "started_at": iso(started),
             "finished_at": iso(started + duration) if started is not None else None,
             "structured": structured, "transcript_segments": segs, "status": "completed",
-            "discarded": False, "source": "omi", "language": summary.get("language"),
+            "discarded": bool(doc.get("skipped")), "source": "omi", "language": summary.get("language"),
             "apps_results": [], "plugins_results": [], "photos": [], "audio_files": []}
 
 
@@ -503,6 +503,10 @@ class AppAPI:
                 return []
             wanted = {s for s in statuses.split(",") if s}
             items = [c for c in self.all() if not wanted or c["status"] in wanted]
+            if not include_discarded:
+                # Recordings the presence filter left untranscribed are Omi's "discarded": out of
+                # the list unless the app asks for them.
+                items = [c for c in items if not c.get("discarded")]
 
             def parse(text: str) -> datetime:
                 d = datetime.fromisoformat(text.replace("Z", "+00:00"))

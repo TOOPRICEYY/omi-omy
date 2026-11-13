@@ -71,7 +71,7 @@ screen again, so never return 401 from the API for anything but a bad token.
 - `GET v1/users/language` → `{"language": ...}` (stored in `data/bridge/app/language.json`, default "en"); `PATCH v1/users/language` with `{"language": code}` → `{"status":"ok","message":"","single_language_mode":false}`. Without these the onboarding language step shows "Failed to set language" and does not move on. The bridge's transcription does not use this setting.
 - `PUT v1/users/time-zone` → `{"status":"ok"}` (accepted and ignored).
 - `GET v1/account/cutover/control` → the legacy-allow object in `CUTOVER_CONTROL`. A 503 or malformed body here puts up a maintenance screen; a 404 also works.
-- `GET v1/conversations?limit&offset&statuses&include_discarded&start_date&end_date&folder_id&starred` → a bare JSON array. `statuses=in_progress` is polled while recording and must return `[]`.
+- `GET v1/conversations?limit&offset&statuses&include_discarded&start_date&end_date&folder_id&starred` → a bare JSON array. `statuses=in_progress` is polled while recording and must return `[]`. Recordings the presence filter left untranscribed have `discarded: true` and are listed only with `include_discarded=true`.
 - `GET v1/conversations/{id}` → one conversation; queued-but-unprocessed ones come back with `status:"processing"`.
 - `DELETE v1/conversations/{id}?cascade=true` → **204** (the folder moves to `data/bridge/trash`).
 - `POST v1/conversations` with `{}` (the stop button) → 200 `{"conversation": ..., "messages": []}`, or 404 when nothing is being recorded (benign for the app).

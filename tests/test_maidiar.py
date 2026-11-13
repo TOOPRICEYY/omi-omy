@@ -373,8 +373,10 @@ def test_skipped_page_survives_rerender_and_shows_in_app(tmp_path):
     assert page["skipped"] and page["speakers"] == [] and page["segments"] == []
     o = to_omi(page, "Me")
     assert o["transcript_segments"] == [] and o["structured"]["title"].startswith("Not transcribed")
+    assert o["discarded"] is True                             # Omi's "discarded": hidden unless asked for
     normal = json.loads((tmp_path / "conversations/c2/conversation.json").read_text())
     assert not normal["skipped"] and all("cluster" in s for s in normal["segments"])
+    assert to_omi(normal, "Me")["discarded"] is False
     # learning a voice elsewhere (which re-renders every page) leaves the skipped one intact
     cl = next(s for s in normal["speakers"] if s["clusters"])
     e.label("c2", cl["name"], "Alice", clusters=cl["clusters"])

@@ -513,6 +513,21 @@ def test_app_naming_from_a_stale_view_names_the_voice_the_app_showed(tmp_path):
     assert set(e.gallery.people) == {"Gabriel", "Bob"}
 
 
+def test_untranscribed_recordings_are_out_of_the_app_list_unless_asked_for(tmp_path):
+    e, api, client, h, _ = naming_env(tmp_path)
+    cid, skipped = "20261112-100000-conv", "20261112-110000-conv"
+    d = e.cfg.conv_dir / skipped
+    d.mkdir(parents=True)
+    (d / "conversation.json").write_text(json.dumps({
+        "id": skipped, "started_at": 1_800_003_600.0, "duration": 60, "speech_seconds": 0, "error": None,
+        "skipped": "your voice not found", "presence_score": 0.2, "speakers": [], "summary": None, "segments": []}))
+    ids = lambda r: {c["id"] for c in r.json()}
+    assert ids(client.get(f"{P}/v1/conversations", headers=h)) == {cid}
+    assert ids(client.get(f"{P}/v1/conversations", params={"include_discarded": "true"}, headers=h)) == {cid, skipped}
+    one = client.get(f"{P}/v1/conversations/{skipped}", headers=h).json()
+    assert one["discarded"] and one["structured"]["title"].startswith("Not transcribed")
+
+
 def test_app_naming_rejects_bad_input(tmp_path):
     e, api, client, h, _ = naming_env(tmp_path, wearer="Gabriel")
     cid = "20261112-100000-conv"

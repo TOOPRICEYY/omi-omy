@@ -79,8 +79,9 @@ points into several conversations.
 
 Presence filter (`OMIBRIDGE_PRESENCE`, default `off`): with `skip`, a conversation in which the
 enrolled wearer's voice (gallery entries named like `OMIBRIDGE_WEARER`, any case) is not found is
-kept but not transcribed: no MAI cost, the audio stays, the review page and the app show "Not
-transcribed: your voice not found" with the match score, and "Transcribe it" on the review page
+kept but not transcribed: no MAI cost, the audio stays, the review page shows "Not transcribed:
+your voice not found" with the match score, the app gets it as a discarded conversation (out of
+its list unless it asks with `include_discarded`), and "Transcribe it" on the review page
 (`POST /api/conversations/<id>/transcribe`) queues it normally. Never skips while no wearer is
 enrolled. The check (`omibridge/presence.py`: pyannote speech, TitaNet on 3 s pieces, the
 bridge's own normalised score, best three) runs before MAI, about 0.5 s per audio minute.
