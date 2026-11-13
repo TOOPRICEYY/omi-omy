@@ -81,6 +81,11 @@ class Config:
     # AMI but sometimes fuses two similar voices, which cannot be undone later.
     cluster_threshold: float = field(default_factory=lambda: _f("OMIBRIDGE_CLUSTER_THRESHOLD", 0.5))
     identify_threshold: float = field(default_factory=lambda: _f("OMIBRIDGE_IDENTIFY_THRESHOLD", 2.5))
+    # A voice is named only if it also resembles the person's samples this much in plain cosine
+    # (0 switches the check off). Measured 2026-11-13 on 318 pendant conversations: an entry
+    # learned from a quiet, distant speaker was named on 104 clusters in 36 voice groups without
+    # the check and on 53 in 11 with 0.4, while the wearer kept 144 of 152.
+    identify_raw_floor: float = field(default_factory=lambda: _f("OMIBRIDGE_IDENTIFY_RAW_FLOOR", 0.4))
     transcribe: bool = field(default_factory=lambda: os.environ.get("OMIBRIDGE_TRANSCRIBE", "1") != "0")
     # Title, overview and action items for each conversation (same OpenRouter key).
     summarize: bool = field(default_factory=lambda: os.environ.get("OMIBRIDGE_SUMMARIZE", "1") != "0")

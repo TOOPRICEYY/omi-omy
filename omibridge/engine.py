@@ -68,7 +68,8 @@ class Engine:
     def _identifier(self) -> Identifier:
         return Identifier(self.gallery, self.cohort,
                           IdentifyConfig(threshold=self.cfg.identify_threshold, wearer=self.cfg.wearer,
-                                         wearer_weight=1.5 if self.cfg.wearer else 0.0))
+                                         wearer_weight=1.5 if self.cfg.wearer else 0.0,
+                                         raw_floor=self.cfg.identify_raw_floor or None))
 
     def name_clusters(self, clusters, pinned: dict[str, str] | None = None) -> tuple[dict, dict]:
         """cluster label -> name, and cluster label -> confidence. `pinned`
